@@ -135,7 +135,7 @@ def init_db():
         )
 
         release_channel = os.getenv("APP_RELEASE_CHANNEL", "stable").strip().lower() or "stable"
-        release_version = os.getenv("APP_LATEST_VERSION", "1.0.4").strip() or "1.0.4"
+        release_version = os.getenv("APP_LATEST_VERSION", "1.0.4.1").strip() or "1.0.4.1"
         release_min_supported = os.getenv("APP_MIN_SUPPORTED_VERSION", "1.0.0").strip() or "1.0.0"
         default_download_url = os.getenv(
             "GEOMAPPER_DOWNLOAD_URL",
@@ -144,9 +144,12 @@ def init_db():
         release_download_url = os.getenv("APP_DOWNLOAD_URL", default_download_url).strip() or default_download_url
         release_notes = os.getenv(
             "APP_RELEASE_NOTES",
-            "GeoMapper Pro 1.0.4: admin visibility, app-wide profile menu, and 20-minute session timeout updates.",
+            "GeoMapper Pro 1.0.4.1: removes the duplicate dashboard profile button while keeping the app-wide profile menu.",
         )
-        release_sha256 = os.getenv("APP_RELEASE_SHA256") or None
+        release_sha256 = os.getenv(
+            "APP_RELEASE_SHA256",
+            "3af56e91a14589933269d3ed1e4bba3be54f775bc29d108088104acee2838818",
+        ).strip() or None
         release_required = os.getenv("APP_UPDATE_REQUIRED", "false").strip().lower() in {"1", "true", "yes"}
 
         active_release = conn.execute(

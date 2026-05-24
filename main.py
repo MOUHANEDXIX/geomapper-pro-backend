@@ -21,7 +21,7 @@ from update_routes import router as update_router
 
 app = FastAPI(
     title="GeoMapper Pro Backend",
-    version="1.0.4",
+    version="1.0.4.1",
 )
 
 
