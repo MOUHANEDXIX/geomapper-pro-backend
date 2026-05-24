@@ -39,6 +39,27 @@ class StatusUpdateRequest(BaseModel):
     status: str
 
 
+class AppReleaseUpdateRequest(BaseModel):
+    """Payload for publishing the active desktop app release metadata."""
+
+    version: str = Field(min_length=1, max_length=40)
+    download_url: str = Field(min_length=1, max_length=500)
+    release_notes: str = Field(default="", max_length=4000)
+    channel: str = Field(default="stable", min_length=1, max_length=40)
+    min_supported_version: str | None = Field(default=None, max_length=40)
+    sha256: str | None = Field(default=None, max_length=128)
+    required: bool = False
+
+    @field_validator("channel")
+    @classmethod
+    def normalize_channel(cls, value: str) -> str:
+        """Keep release channels URL-safe and predictable."""
+        channel = value.strip().lower()
+        if not channel.replace("-", "").replace("_", "").isalnum():
+            raise ValueError("Release channel must be alphanumeric.")
+        return channel
+
+
 class ProfileUpdateRequest(BaseModel):
     """Payload for profile edits from the desktop app or website."""
 

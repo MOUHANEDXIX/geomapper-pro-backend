@@ -17,10 +17,11 @@ from admin_routes import get_current_user, router as admin_router
 from database import get_db, init_default_admin
 from email_service import EmailService
 from models import ProfileUpdateRequest
+from update_routes import router as update_router
 
 app = FastAPI(
     title="GeoMapper Pro Backend",
-    version="1.0.0",
+    version="1.0.4",
 )
 
 
@@ -57,6 +58,7 @@ def root():
     return {
         "ok": True,
         "message": "GeoMapper Pro backend is running.",
+        "version": app.version,
     }
 
 
@@ -66,6 +68,7 @@ def healthz():
     return {
         "ok": True,
         "message": "GeoMapper Pro backend is healthy.",
+        "version": app.version,
     }
 
 
@@ -196,3 +199,4 @@ def update_profile(
 
 app.include_router(auth_router)
 app.include_router(admin_router)
+app.include_router(update_router)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import quote, unquote
@@ -18,6 +19,25 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL is missing from .env")
+
+
+def _version_parts(value: str | None) -> tuple[int, ...]:
+    """Return numeric parts for a simple release-version comparison."""
+
+    if not value:
+        return ()
+    return tuple(int(part) for part in re.findall(r"\d+", str(value))[:4])
+
+
+def _is_newer_version(latest: str | None, current: str | None) -> bool:
+    """Return True when latest is newer than current."""
+
+    latest_parts = _version_parts(latest)
+    current_parts = _version_parts(current)
+    width = max(len(latest_parts), len(current_parts), 1)
+    latest_parts += (0,) * (width - len(latest_parts))
+    current_parts += (0,) * (width - len(current_parts))
+    return latest_parts > current_parts
 
 
 def normalize_database_url(database_url: str) -> str:
@@ -70,7 +90,7 @@ def get_db():
 
 
 def init_db():
-    """Create the account table if it does not already exist."""
+    """Create backend tables if they do not already exist."""
     with get_db() as conn:
         conn.execute(
             """
@@ -89,6 +109,92 @@ def init_db():
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS app_releases (
+                id BIGSERIAL PRIMARY KEY,
+                channel TEXT NOT NULL DEFAULT 'stable',
+                version TEXT NOT NULL,
+                min_supported_version TEXT,
+                download_url TEXT NOT NULL,
+                release_notes TEXT NOT NULL DEFAULT '',
+                sha256 TEXT,
+                required BOOLEAN NOT NULL DEFAULT FALSE,
+                is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                published_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS app_releases_one_active_channel
+            ON app_releases (channel)
+            WHERE is_active
+            """
+        )
+
+        release_channel = os.getenv("APP_RELEASE_CHANNEL", "stable").strip().lower() or "stable"
+        release_version = os.getenv("APP_LATEST_VERSION", "1.0.4").strip() or "1.0.4"
+        release_min_supported = os.getenv("APP_MIN_SUPPORTED_VERSION", "1.0.0").strip() or "1.0.0"
+        default_download_url = os.getenv(
+            "GEOMAPPER_DOWNLOAD_URL",
+            "https://github.com/MOUHANEDXIX/geomapper-pro-downloads/releases/latest/download/GeoMapperPro.exe",
+        ).strip()
+        release_download_url = os.getenv("APP_DOWNLOAD_URL", default_download_url).strip() or default_download_url
+        release_notes = os.getenv(
+            "APP_RELEASE_NOTES",
+            "GeoMapper Pro 1.0.4: admin visibility, app-wide profile menu, and 20-minute session timeout updates.",
+        )
+        release_sha256 = os.getenv("APP_RELEASE_SHA256") or None
+        release_required = os.getenv("APP_UPDATE_REQUIRED", "false").strip().lower() in {"1", "true", "yes"}
+
+        active_release = conn.execute(
+            """
+            SELECT id, version
+            FROM app_releases
+            WHERE channel = %s
+              AND is_active = TRUE
+            LIMIT 1
+            """,
+            (release_channel,),
+        ).fetchone()
+
+        should_publish_release = not active_release or _is_newer_version(release_version, active_release.get("version"))
+        if should_publish_release:
+            if active_release:
+                conn.execute(
+                    """
+                    UPDATE app_releases
+                    SET is_active = FALSE
+                    WHERE id = %s
+                    """,
+                    (active_release["id"],),
+                )
+            conn.execute(
+                """
+                INSERT INTO app_releases (
+                    channel,
+                    version,
+                    min_supported_version,
+                    download_url,
+                    release_notes,
+                    sha256,
+                    required,
+                    is_active
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, TRUE)
+                """,
+                (
+                    release_channel,
+                    release_version,
+                    release_min_supported,
+                    release_download_url,
+                    release_notes,
+                    release_sha256,
+                    release_required,
+                ),
+            )
 
 
 def init_default_admin():
