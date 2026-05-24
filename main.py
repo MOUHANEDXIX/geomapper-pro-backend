@@ -8,21 +8,27 @@ management.
 from __future__ import annotations
 
 import os
+import asyncio
+from contextlib import suppress
+import logging
 
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from auth_routes import generate_code, router as auth_router, user_to_public_dict
 from admin_routes import get_current_user, router as admin_router
-from database import get_db, init_default_admin
+from database import cleanup_expired_unverified_users, get_db, init_default_admin
 from email_service import EmailService
 from models import ProfileUpdateRequest
 from update_routes import router as update_router
 
 app = FastAPI(
     title="GeoMapper Pro Backend",
-    version="1.0.4.1",
+    version="1.1.0",
 )
+
+logger = logging.getLogger(__name__)
+_expired_user_cleanup_task: asyncio.Task | None = None
 
 
 def cors_origins_from_env() -> list[str]:
@@ -50,6 +56,38 @@ app.add_middleware(
 def startup_event():
     """Create the account table and ensure the configured admin exists."""
     init_default_admin()
+    cleanup_expired_unverified_users()
+
+
+@app.on_event("startup")
+async def start_expired_user_cleanup():
+    """Run periodic cleanup for accounts that never verified their first email."""
+    global _expired_user_cleanup_task
+    if _expired_user_cleanup_task is None or _expired_user_cleanup_task.done():
+        _expired_user_cleanup_task = asyncio.create_task(_cleanup_expired_users_loop())
+
+
+@app.on_event("shutdown")
+async def stop_expired_user_cleanup():
+    """Stop the periodic cleanup task during backend shutdown."""
+    if _expired_user_cleanup_task is None:
+        return
+
+    _expired_user_cleanup_task.cancel()
+    with suppress(asyncio.CancelledError):
+        await _expired_user_cleanup_task
+
+
+async def _cleanup_expired_users_loop():
+    """Delete expired unverified signups once per minute."""
+    while True:
+        await asyncio.sleep(60)
+        try:
+            deleted = cleanup_expired_unverified_users()
+            if deleted:
+                logger.info("Deleted %s expired unverified account(s).", deleted)
+        except Exception:
+            logger.exception("Expired unverified account cleanup failed.")
 
 
 @app.get("/")

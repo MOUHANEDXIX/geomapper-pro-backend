@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, HTTPException
 
-from database import get_db
+from database import cleanup_expired_unverified_users, get_db
 from email_service import EmailService
 from models import (
     ApiResponse,
@@ -50,6 +50,7 @@ def user_to_public_dict(user: dict) -> dict:
 @router.post("/register", response_model=ApiResponse)
 def register_user(payload: RegisterRequest):
     """Create a normal user account and send an email verification code."""
+    cleanup_expired_unverified_users()
     username = payload.username.strip()
     email = str(payload.email).strip().lower()
     password = payload.password.strip()
@@ -129,6 +130,7 @@ def register_user(payload: RegisterRequest):
 @router.post("/login", response_model=AuthResponse)
 def login(payload: LoginRequest):
     """Authenticate a user/admin and return a JWT plus public profile."""
+    cleanup_expired_unverified_users()
     login_value = payload.login.strip()
     password = payload.password.strip()
 
@@ -185,6 +187,7 @@ def login(payload: LoginRequest):
 @router.post("/verify-email", response_model=ApiResponse)
 def verify_email(payload: VerifyEmailRequest):
     """Validate an email verification code and mark the account verified."""
+    cleanup_expired_unverified_users()
     email = str(payload.email).strip().lower()
     code = payload.code.strip()
 
@@ -225,6 +228,7 @@ def verify_email(payload: VerifyEmailRequest):
             """
             UPDATE app_users
             SET email_verified = TRUE,
+                initial_email_verified = TRUE,
                 email_verification_code = NULL,
                 email_verification_expires_at = NULL
             WHERE id = %s
@@ -238,6 +242,7 @@ def verify_email(payload: VerifyEmailRequest):
 @router.post("/resend-code", response_model=ApiResponse)
 def resend_code(payload: ResendCodeRequest):
     """Generate and email a fresh verification code for an unverified user."""
+    cleanup_expired_unverified_users()
     email = str(payload.email).strip().lower()
     code, expires_at = generate_code()
 

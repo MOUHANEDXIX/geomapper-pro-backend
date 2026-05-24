@@ -104,9 +104,24 @@ def init_db():
                 email_verified BOOLEAN NOT NULL DEFAULT FALSE,
                 email_verification_code TEXT,
                 email_verification_expires_at TIMESTAMPTZ,
+                initial_email_verified BOOLEAN NOT NULL DEFAULT FALSE,
                 avatar_path TEXT,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
+            """
+        )
+        conn.execute(
+            """
+            ALTER TABLE app_users
+            ADD COLUMN IF NOT EXISTS initial_email_verified BOOLEAN NOT NULL DEFAULT FALSE
+            """
+        )
+        conn.execute(
+            """
+            UPDATE app_users
+            SET initial_email_verified = TRUE
+            WHERE role = 'admin'
+               OR email_verified = TRUE
             """
         )
         conn.execute(
@@ -135,7 +150,7 @@ def init_db():
         )
 
         release_channel = os.getenv("APP_RELEASE_CHANNEL", "stable").strip().lower() or "stable"
-        release_version = os.getenv("APP_LATEST_VERSION", "1.0.4.1").strip() or "1.0.4.1"
+        release_version = os.getenv("APP_LATEST_VERSION", "1.1.0").strip() or "1.1.0"
         release_min_supported = os.getenv("APP_MIN_SUPPORTED_VERSION", "1.0.0").strip() or "1.0.0"
         default_download_url = os.getenv(
             "GEOMAPPER_DOWNLOAD_URL",
@@ -144,11 +159,11 @@ def init_db():
         release_download_url = os.getenv("APP_DOWNLOAD_URL", default_download_url).strip() or default_download_url
         release_notes = os.getenv(
             "APP_RELEASE_NOTES",
-            "GeoMapper Pro 1.0.4.1: removes the duplicate dashboard profile button while keeping the app-wide profile menu.",
+            "GeoMapper Pro 1.1.0: deletes expired unverified signups, refreshes desktop account access from the backend, and closes offline sessions after five reconnect attempts.",
         )
         release_sha256 = os.getenv(
             "APP_RELEASE_SHA256",
-            "3af56e91a14589933269d3ed1e4bba3be54f775bc29d108088104acee2838818",
+            "0b4a9bb767b8083160c97d0fa68e02379b0da760e41211dd91a779aa62661e28",
         ).strip() or None
         release_required = os.getenv("APP_UPDATE_REQUIRED", "false").strip().lower() in {"1", "true", "yes"}
 
@@ -231,6 +246,7 @@ def init_default_admin():
                 SET role = 'admin',
                     status = 'paid',
                     email_verified = TRUE,
+                    initial_email_verified = TRUE,
                     email_verification_code = NULL,
                     email_verification_expires_at = NULL
                 WHERE id = %s
@@ -248,9 +264,28 @@ def init_default_admin():
                 password_hash,
                 role,
                 status,
-                email_verified
+                email_verified,
+                initial_email_verified
             )
-            VALUES (%s, %s, %s, 'admin', 'paid', TRUE)
+            VALUES (%s, %s, %s, 'admin', 'paid', TRUE, TRUE)
             """,
             (username, email, password_hash),
         )
+
+
+def cleanup_expired_unverified_users() -> int:
+    """Delete newly-created accounts that missed their verification window."""
+    with get_db() as conn:
+        rows = conn.execute(
+            """
+            DELETE FROM app_users
+            WHERE role <> 'admin'
+              AND email_verified = FALSE
+              AND initial_email_verified = FALSE
+              AND email_verification_expires_at IS NOT NULL
+              AND email_verification_expires_at <= NOW()
+            RETURNING id
+            """
+        ).fetchall()
+
+    return len(rows)
