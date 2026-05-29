@@ -150,20 +150,20 @@ def init_db():
         )
 
         release_channel = os.getenv("APP_RELEASE_CHANNEL", "stable").strip().lower() or "stable"
-        release_version = os.getenv("APP_LATEST_VERSION", "1.1.0").strip() or "1.1.0"
-        release_min_supported = os.getenv("APP_MIN_SUPPORTED_VERSION", "1.0.0").strip() or "1.0.0"
+        release_version = os.getenv("APP_LATEST_VERSION", "1.1.1").strip() or "1.1.1"
+        release_min_supported = os.getenv("APP_MIN_SUPPORTED_VERSION", "1.1.1").strip() or "1.1.1"
         default_download_url = os.getenv(
             "GEOMAPPER_DOWNLOAD_URL",
-            "https://github.com/MOUHANEDXIX/geomapper-pro-downloads/releases/latest/download/GeoMapperPro.exe",
+            "https://github.com/MOUHANEDXIX/geomapper-pro-downloads/releases/latest/download/GeoMapperProSetup.exe",
         ).strip()
         release_download_url = os.getenv("APP_DOWNLOAD_URL", default_download_url).strip() or default_download_url
         release_notes = os.getenv(
             "APP_RELEASE_NOTES",
-            "GeoMapper Pro 1.1.0: deletes expired unverified signups, refreshes desktop account access from the backend, and closes offline sessions after five reconnect attempts.",
+            "GeoMapper Pro 1.1.1: fixes vector drag-and-drop format validation, switches releases to a Windows installer, and enforces required update prompts for signed-in sessions.",
         )
         release_sha256 = os.getenv(
             "APP_RELEASE_SHA256",
-            "0b4a9bb767b8083160c97d0fa68e02379b0da760e41211dd91a779aa62661e28",
+            "",
         ).strip() or None
         release_required = os.getenv("APP_UPDATE_REQUIRED", "false").strip().lower() in {"1", "true", "yes"}
 

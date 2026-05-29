@@ -24,7 +24,7 @@ from update_routes import router as update_router
 
 app = FastAPI(
     title="GeoMapper Pro Backend",
-    version="1.1.0",
+    version="1.1.1",
 )
 
 logger = logging.getLogger(__name__)
