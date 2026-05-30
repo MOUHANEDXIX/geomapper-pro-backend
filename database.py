@@ -106,6 +106,12 @@ def init_db():
                 email_verification_expires_at TIMESTAMPTZ,
                 initial_email_verified BOOLEAN NOT NULL DEFAULT FALSE,
                 avatar_path TEXT,
+                account_state TEXT NOT NULL DEFAULT 'active',
+                payment_plan TEXT NOT NULL DEFAULT 'free',
+                requested_plan TEXT,
+                password_reset_code TEXT,
+                password_reset_expires_at TIMESTAMPTZ,
+                deactivated_at TIMESTAMPTZ,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
             """
@@ -116,12 +122,28 @@ def init_db():
             ADD COLUMN IF NOT EXISTS initial_email_verified BOOLEAN NOT NULL DEFAULT FALSE
             """
         )
+        conn.execute("ALTER TABLE app_users ADD COLUMN IF NOT EXISTS account_state TEXT NOT NULL DEFAULT 'active'")
+        conn.execute("ALTER TABLE app_users ADD COLUMN IF NOT EXISTS payment_plan TEXT NOT NULL DEFAULT 'free'")
+        conn.execute("ALTER TABLE app_users ADD COLUMN IF NOT EXISTS requested_plan TEXT")
+        conn.execute("ALTER TABLE app_users ADD COLUMN IF NOT EXISTS password_reset_code TEXT")
+        conn.execute("ALTER TABLE app_users ADD COLUMN IF NOT EXISTS password_reset_expires_at TIMESTAMPTZ")
+        conn.execute("ALTER TABLE app_users ADD COLUMN IF NOT EXISTS deactivated_at TIMESTAMPTZ")
         conn.execute(
             """
             UPDATE app_users
             SET initial_email_verified = TRUE
             WHERE role = 'admin'
                OR email_verified = TRUE
+            """
+        )
+        conn.execute(
+            """
+            UPDATE app_users
+            SET payment_plan = CASE
+                WHEN role = 'admin' THEN 'admin'
+                WHEN status = 'paid' AND payment_plan = 'free' THEN 'plus'
+                ELSE payment_plan
+            END
             """
         )
         conn.execute(
@@ -134,9 +156,39 @@ def init_db():
                 download_url TEXT NOT NULL,
                 release_notes TEXT NOT NULL DEFAULT '',
                 sha256 TEXT,
+                installer_filename TEXT,
+                installer_size_bytes BIGINT,
                 required BOOLEAN NOT NULL DEFAULT FALSE,
                 is_active BOOLEAN NOT NULL DEFAULT TRUE,
                 published_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """
+        )
+        conn.execute("ALTER TABLE app_releases ADD COLUMN IF NOT EXISTS installer_filename TEXT")
+        conn.execute("ALTER TABLE app_releases ADD COLUMN IF NOT EXISTS installer_size_bytes BIGINT")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS support_messages (
+                id BIGSERIAL PRIMARY KEY,
+                name TEXT NOT NULL,
+                email TEXT NOT NULL,
+                subject TEXT NOT NULL,
+                category TEXT NOT NULL,
+                message TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'new',
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS analytics_events (
+                id BIGSERIAL PRIMARY KEY,
+                event_name TEXT NOT NULL,
+                session_id TEXT,
+                page TEXT,
+                metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
             """
@@ -159,17 +211,22 @@ def init_db():
         release_download_url = os.getenv("APP_DOWNLOAD_URL", default_download_url).strip() or default_download_url
         release_notes = os.getenv(
             "APP_RELEASE_NOTES",
-            "GeoMapper Pro 1.1.1: fixes vector drag-and-drop format validation, switches releases to a Windows installer, and enforces required update prompts for signed-in sessions.",
+            "GeoMapper Pro 1.1.1: fixes vector drag-and-drop validation, switches releases to a Windows installer, enforces required update prompts, and fixes the Windows taskbar icon for installed launches.",
         )
         release_sha256 = os.getenv(
             "APP_RELEASE_SHA256",
-            "",
+            "31F2FFEE574A516A1133BE41ACDC4B021463145D2282EA23F16B63D966542F99",
         ).strip() or None
+        release_installer_filename = os.getenv("APP_INSTALLER_FILENAME", "GeoMapperProSetup.exe").strip() or "GeoMapperProSetup.exe"
+        installer_size_raw = os.getenv("APP_INSTALLER_SIZE_BYTES", "143207067").strip()
+        release_installer_size = int(installer_size_raw) if installer_size_raw.isdigit() else None
         release_required = os.getenv("APP_UPDATE_REQUIRED", "false").strip().lower() in {"1", "true", "yes"}
 
         active_release = conn.execute(
             """
-            SELECT id, version
+            SELECT id, version, min_supported_version, download_url,
+                   release_notes, sha256, installer_filename,
+                   installer_size_bytes, required
             FROM app_releases
             WHERE channel = %s
               AND is_active = TRUE
@@ -198,10 +255,12 @@ def init_db():
                     download_url,
                     release_notes,
                     sha256,
+                    installer_filename,
+                    installer_size_bytes,
                     required,
                     is_active
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, TRUE)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE)
                 """,
                 (
                     release_channel,
@@ -210,9 +269,46 @@ def init_db():
                     release_download_url,
                     release_notes,
                     release_sha256,
+                    release_installer_filename,
+                    release_installer_size,
                     release_required,
                 ),
             )
+        elif active_release.get("version") == release_version:
+            metadata_changed = (
+                active_release.get("min_supported_version") != release_min_supported
+                or active_release.get("download_url") != release_download_url
+                or active_release.get("release_notes") != release_notes
+                or active_release.get("sha256") != release_sha256
+                or active_release.get("installer_filename") != release_installer_filename
+                or active_release.get("installer_size_bytes") != release_installer_size
+                or bool(active_release.get("required")) != release_required
+            )
+            if metadata_changed:
+                conn.execute(
+                    """
+                    UPDATE app_releases
+                    SET min_supported_version = %s,
+                        download_url = %s,
+                        release_notes = %s,
+                        sha256 = %s,
+                        installer_filename = %s,
+                        installer_size_bytes = %s,
+                        required = %s,
+                        published_at = NOW()
+                    WHERE id = %s
+                    """,
+                    (
+                        release_min_supported,
+                        release_download_url,
+                        release_notes,
+                        release_sha256,
+                        release_installer_filename,
+                        release_installer_size,
+                        release_required,
+                        active_release["id"],
+                    ),
+                )
 
 
 def init_default_admin():
@@ -245,6 +341,8 @@ def init_default_admin():
                 UPDATE app_users
                 SET role = 'admin',
                     status = 'paid',
+                    account_state = 'active',
+                    payment_plan = 'admin',
                     email_verified = TRUE,
                     initial_email_verified = TRUE,
                     email_verification_code = NULL,
@@ -264,10 +362,12 @@ def init_default_admin():
                 password_hash,
                 role,
                 status,
+                account_state,
+                payment_plan,
                 email_verified,
                 initial_email_verified
             )
-            VALUES (%s, %s, %s, 'admin', 'paid', TRUE, TRUE)
+            VALUES (%s, %s, %s, 'admin', 'paid', 'active', 'admin', TRUE, TRUE)
             """,
             (username, email, password_hash),
         )

@@ -12,15 +12,18 @@ import asyncio
 from contextlib import suppress
 import logging
 
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from auth_routes import generate_code, router as auth_router, user_to_public_dict
 from admin_routes import get_current_user, router as admin_router
 from database import cleanup_expired_unverified_users, get_db, init_default_admin
 from email_service import EmailService
-from models import ProfileUpdateRequest
+from models import ChangePasswordRequest, DeactivateAccountRequest, ProfileUpdateRequest
+from rate_limit import enforce_rate_limit
+from security import hash_password, verify_password
 from update_routes import router as update_router
+from website_routes import router as website_router
 
 app = FastAPI(
     title="GeoMapper Pro Backend",
@@ -39,7 +42,11 @@ def cors_origins_from_env() -> list[str]:
         for origin in raw_origins.split(",")
         if origin.strip()
     ]
-    return origins or ["*"]
+    origins = origins or ["*"]
+    allow_local = os.getenv("BACKEND_ALLOW_LOCAL_ORIGINS", "true").strip().lower() not in {"0", "false", "no"}
+    if "*" not in origins and allow_local:
+        origins.extend(["http://127.0.0.1:5173", "http://localhost:5173"])
+    return list(dict.fromkeys(origins))
 
 
 cors_origins = cors_origins_from_env()
@@ -115,18 +122,7 @@ def me(current_user: dict = Depends(get_current_user)):
     """Return the authenticated user's public account profile."""
     return {
         "ok": True,
-        "user": {
-            "id": current_user["id"],
-            "username": current_user["username"],
-            "email": current_user["email"],
-            "role": current_user["role"],
-            "status": current_user["status"],
-            "email_verified": bool(current_user["email_verified"]),
-            "avatar_path": current_user.get("avatar_path"),
-            "created_at": current_user["created_at"].isoformat()
-            if current_user.get("created_at")
-            else None,
-        },
+        "user": user_to_public_dict(current_user),
     }
 
 
@@ -207,7 +203,8 @@ def update_profile(
         # state after database triggers/defaults and verification changes.
         updated_user = conn.execute(
             """
-            SELECT id, username, email, role, status, email_verified, avatar_path, created_at
+            SELECT id, username, email, role, status, account_state,
+                   payment_plan, requested_plan, email_verified, avatar_path, created_at
             FROM app_users
             WHERE id = %s
             """,
@@ -220,11 +217,9 @@ def update_profile(
         try:
             EmailService().send_verification_code(email, username, code)
             message = "Profile updated. A verification code was sent to the new email address."
-        except Exception as exc:
-            message = (
-                "Profile updated, but the verification email could not be sent.\n\n"
-                f"Error: {exc}"
-            )
+        except Exception:
+            logger.exception("Profile email-change verification delivery failed")
+            message = "Profile updated, but the verification email could not be sent. Please use 'Resend code' shortly."
     else:
         message = "Profile updated successfully."
 
@@ -235,6 +230,78 @@ def update_profile(
     }
 
 
+@app.post("/me/change-password")
+def change_password(
+    payload: ChangePasswordRequest,
+    request: Request,
+    current_user: dict = Depends(get_current_user),
+):
+    """Replace the signed-in user's password after checking the current value."""
+    enforce_rate_limit(request, "change_password", str(current_user["id"]))
+    with get_db() as conn:
+        user = conn.execute(
+            "SELECT password_hash FROM app_users WHERE id = %s",
+            (current_user["id"],),
+        ).fetchone()
+        if not user or not verify_password(payload.current_password, user["password_hash"]):
+            return {
+                "ok": False,
+                "message": "Current password is incorrect.",
+            }
+        conn.execute(
+            "UPDATE app_users SET password_hash = %s WHERE id = %s",
+            (hash_password(payload.new_password.strip()), current_user["id"]),
+        )
+
+    return {
+        "ok": True,
+        "message": "Password updated successfully.",
+    }
+
+
+@app.post("/me/deactivate")
+def deactivate_account(
+    payload: DeactivateAccountRequest,
+    request: Request,
+    current_user: dict = Depends(get_current_user),
+):
+    """Deactivate a normal user's account without destroying account history."""
+    enforce_rate_limit(request, "deactivate", str(current_user["id"]))
+    if current_user["role"] == "admin":
+        return {
+            "ok": False,
+            "message": "Administrator accounts cannot be deactivated here.",
+        }
+
+    with get_db() as conn:
+        user = conn.execute(
+            "SELECT password_hash FROM app_users WHERE id = %s",
+            (current_user["id"],),
+        ).fetchone()
+        if not user or not verify_password(payload.password, user["password_hash"]):
+            return {
+                "ok": False,
+                "message": "Password confirmation is incorrect.",
+            }
+        conn.execute(
+            """
+            UPDATE app_users
+            SET account_state = 'deactivated',
+                deactivated_at = NOW(),
+                password_reset_code = NULL,
+                password_reset_expires_at = NULL
+            WHERE id = %s
+            """,
+            (current_user["id"],),
+        )
+
+    return {
+        "ok": True,
+        "message": "Your account has been deactivated.",
+    }
+
+
 app.include_router(auth_router)
 app.include_router(admin_router)
 app.include_router(update_router)
+app.include_router(website_router)

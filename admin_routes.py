@@ -8,6 +8,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from database import get_db
 from models import ApiResponse, StatusUpdateRequest
 from security import decode_access_token
+from access_policy import active_plan_code
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
 
@@ -37,7 +38,8 @@ def get_current_user(
     with get_db() as conn:
         user = conn.execute(
             """
-            SELECT id, username, email, role, status, email_verified, avatar_path, created_at
+            SELECT id, username, email, role, status, account_state,
+                   payment_plan, requested_plan, email_verified, avatar_path, created_at
             FROM app_users
             WHERE id = %s
             """,
@@ -46,6 +48,8 @@ def get_current_user(
 
     if not user:
         raise HTTPException(status_code=401, detail="User not found.")
+    if user.get("account_state", "active") != "active":
+        raise HTTPException(status_code=401, detail="Account is unavailable.")
 
     return user
 
@@ -66,6 +70,10 @@ def public_user(user: dict) -> dict:
         "email": user["email"],
         "role": user["role"],
         "status": user["status"],
+        "account_state": user.get("account_state") or "active",
+        "payment_plan": user.get("payment_plan") or "free",
+        "requested_plan": user.get("requested_plan"),
+        "active_plan": active_plan_code(user),
         "email_verified": bool(user["email_verified"]),
         "avatar_path": user.get("avatar_path"),
         "created_at": user["created_at"].isoformat() if user.get("created_at") else None,
@@ -78,7 +86,8 @@ def list_users(_: dict = Depends(require_admin)):
     with get_db() as conn:
         rows = conn.execute(
             """
-            SELECT id, username, email, role, status, email_verified, avatar_path, created_at
+            SELECT id, username, email, role, status, account_state,
+                   payment_plan, requested_plan, email_verified, avatar_path, created_at
             FROM app_users
             ORDER BY id ASC
             """
@@ -98,9 +107,12 @@ def update_user_status(
 ):
     """Update a non-admin user's payment/access status."""
     status = payload.status.strip()
+    payment_plan = (payload.payment_plan or "").strip().lower()
 
     if status not in VALID_STATUSES:
         return ApiResponse(ok=False, message="Invalid status.")
+    if payment_plan and payment_plan not in {"free", "plus", "pro"}:
+        return ApiResponse(ok=False, message="Invalid plan.")
 
     with get_db() as conn:
         # Read role first so the administrator account cannot be downgraded.
@@ -123,10 +135,16 @@ def update_user_status(
         conn.execute(
             """
             UPDATE app_users
-            SET status = %s
+            SET status = %s,
+                payment_plan = CASE
+                    WHEN %s <> '' THEN %s
+                    WHEN %s = 'paid' AND requested_plan IN ('plus', 'pro') THEN requested_plan
+                    WHEN %s = 'paid' AND payment_plan = 'free' THEN 'plus'
+                    ELSE payment_plan
+                END
             WHERE id = %s
             """,
-            (status, user_id),
+            (status, payment_plan, payment_plan, status, status, user_id),
         )
 
     return ApiResponse(ok=True, message=f"Status updated: {status}")

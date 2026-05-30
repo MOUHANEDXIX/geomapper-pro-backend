@@ -45,6 +45,8 @@ def _release_to_public(row: dict, current_version: str | None = None) -> dict:
         "download_url": row["download_url"],
         "release_notes": row.get("release_notes") or "",
         "sha256": row.get("sha256"),
+        "installer_filename": row.get("installer_filename") or "GeoMapperProSetup.exe",
+        "installer_size_bytes": row.get("installer_size_bytes"),
         "required": bool(row.get("required")) or below_minimum,
         "update_available": update_available,
         "published_at": row["published_at"].isoformat() if row.get("published_at") else None,
@@ -58,7 +60,8 @@ def get_active_release(channel: str = "stable") -> dict | None:
         row = conn.execute(
             """
             SELECT id, channel, version, min_supported_version, download_url,
-                   release_notes, sha256, required, published_at
+                   release_notes, sha256, installer_filename,
+                   installer_size_bytes, required, published_at
             FROM app_releases
             WHERE channel = %s
               AND is_active = TRUE
@@ -74,7 +77,8 @@ def get_active_release(channel: str = "stable") -> dict | None:
         return conn.execute(
             """
             SELECT id, channel, version, min_supported_version, download_url,
-                   release_notes, sha256, required, published_at
+                   release_notes, sha256, installer_filename,
+                   installer_size_bytes, required, published_at
             FROM app_releases
             WHERE channel = 'stable'
               AND is_active = TRUE
@@ -97,6 +101,29 @@ def app_version(
             "message": "No active app release is configured.",
         }
     return _release_to_public(release, current_version)
+
+
+@router.get("/app/changelog")
+def app_changelog(channel: str = Query(default="stable")):
+    """Return public release history for the changelog page."""
+    channel = (channel or "stable").strip().lower()
+    with get_db() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, channel, version, min_supported_version, download_url,
+                   release_notes, sha256, installer_filename,
+                   installer_size_bytes, required, published_at
+            FROM app_releases
+            WHERE channel = %s
+            ORDER BY published_at DESC, id DESC
+            LIMIT 50
+            """,
+            (channel,),
+        ).fetchall()
+    return {
+        "ok": True,
+        "releases": [_release_to_public(row) for row in rows],
+    }
 
 
 @router.get("/admin/app-release")
@@ -141,10 +168,12 @@ def admin_set_app_release(
                 download_url,
                 release_notes,
                 sha256,
+                installer_filename,
+                installer_size_bytes,
                 required,
                 is_active
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, TRUE)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE)
             """,
             (
                 channel,
@@ -153,6 +182,8 @@ def admin_set_app_release(
                 payload.download_url.strip(),
                 payload.release_notes.strip(),
                 payload.sha256.strip() if payload.sha256 else None,
+                payload.installer_filename.strip() if payload.installer_filename else "GeoMapperProSetup.exe",
+                payload.installer_size_bytes,
                 bool(payload.required),
             ),
         )

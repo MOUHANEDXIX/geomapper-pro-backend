@@ -1,65 +1,83 @@
-"""Authentication and email-verification routes for GeoMapper Pro."""
+"""Authentication, verification, and password-recovery routes."""
 
 from __future__ import annotations
 
-import random
+import logging
+import secrets
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 
+from access_policy import active_plan_code
 from database import cleanup_expired_unverified_users, get_db
 from email_service import EmailService
 from models import (
     ApiResponse,
     AuthResponse,
+    ForgotPasswordRequest,
     LoginRequest,
     RegisterRequest,
     ResendCodeRequest,
+    ResetPasswordRequest,
     VerifyEmailRequest,
 )
+from rate_limit import enforce_rate_limit
 from security import create_access_token, hash_password, verify_password
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
+logger = logging.getLogger(__name__)
 
 STATUS_AWAITING = "awaiting_payment"
 STATUS_PAID = "paid"
 STATUS_UNPAID = "unpaid"
+ACCOUNT_ACTIVE = "active"
+RESET_MESSAGE = "If this email exists, a password reset message has been sent."
 
 
 def generate_code() -> tuple[str, datetime]:
-    """Create a short-lived six-digit email verification code."""
-    code = str(random.randint(100000, 999999))
+    """Create a short-lived six-digit email code."""
+    code = str(secrets.randbelow(900_000) + 100_000)
     expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
     return code, expires_at
 
 
 def user_to_public_dict(user: dict) -> dict:
-    """Convert a database row into the account shape returned to clients."""
+    """Convert a database row into the safe account shape returned to clients."""
     return {
         "id": user["id"],
         "username": user["username"],
         "email": user["email"],
         "role": user["role"],
         "status": user["status"],
+        "account_state": user.get("account_state") or ACCOUNT_ACTIVE,
+        "payment_plan": user.get("payment_plan") or "free",
+        "requested_plan": user.get("requested_plan"),
+        "active_plan": active_plan_code(user),
         "email_verified": bool(user["email_verified"]),
         "avatar_path": user.get("avatar_path"),
         "created_at": user["created_at"].isoformat() if user.get("created_at") else None,
     }
 
 
+def _normalized_timestamp(value: datetime | None) -> datetime | None:
+    """Return a timezone-aware timestamp for database-driver compatibility."""
+    if value and value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
+
+
 @router.post("/register", response_model=ApiResponse)
-def register_user(payload: RegisterRequest):
+def register_user(payload: RegisterRequest, request: Request):
     """Create a normal user account and send an email verification code."""
     cleanup_expired_unverified_users()
     username = payload.username.strip()
     email = str(payload.email).strip().lower()
     password = payload.password.strip()
-
+    enforce_rate_limit(request, "signup", email)
     code, expires_at = generate_code()
 
     try:
         with get_db() as conn:
-            # Reject duplicate usernames/emails before inserting the account.
             existing = conn.execute(
                 """
                 SELECT id FROM app_users
@@ -70,13 +88,8 @@ def register_user(payload: RegisterRequest):
             ).fetchone()
 
             if existing:
-                return ApiResponse(
-                    ok=False,
-                    message="Username or email is already in use.",
-                )
+                return ApiResponse(ok=False, message="Username or email is already in use.")
 
-            # New users start locked to paid modules until email and payment
-            # validation complete.
             conn.execute(
                 """
                 INSERT INTO app_users (
@@ -85,56 +98,49 @@ def register_user(payload: RegisterRequest):
                     password_hash,
                     role,
                     status,
+                    account_state,
+                    payment_plan,
                     email_verified,
                     email_verification_code,
                     email_verification_expires_at
                 )
-                VALUES (%s, %s, %s, 'user', %s, FALSE, %s, %s)
+                VALUES (%s, %s, %s, 'user', %s, 'active', 'free', FALSE, %s, %s)
                 """,
-                (
-                    username,
-                    email,
-                    hash_password(password),
-                    STATUS_AWAITING,
-                    code,
-                    expires_at,
-                ),
+                (username, email, hash_password(password), STATUS_AWAITING, code, expires_at),
             )
+    except Exception:
+        logger.exception("Account registration failed")
+        raise HTTPException(status_code=500, detail="Account creation is temporarily unavailable. Please try again later.")
 
-        # The account remains created if SMTP fails, but the caller gets clear
-        # instructions so verification can be retried after configuration fixes.
-        try:
-            EmailService().send_verification_code(email, username, code)
-        except Exception as exc:
-            return ApiResponse(
-                ok=True,
-                message=(
-                    "Account created, but the verification email could not be sent.\n\n"
-                    f"Error: {exc}\n\n"
-                    "After SMTP is corrected, click 'Verify email' and then 'Resend code'."
-                ),
-            )
-
+    try:
+        EmailService().send_verification_code(email, username, code)
+    except Exception:
+        logger.exception("Verification email delivery failed for new account")
         return ApiResponse(
             ok=True,
             message=(
-                "Account created successfully. A verification code was sent to your email.\n"
-                "After verification, Raster and Vector access will be enabled after payment validation."
+                "Account created, but the verification email could not be sent. "
+                "Please use 'Resend code' shortly or contact support."
             ),
         )
 
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
+    return ApiResponse(
+        ok=True,
+        message=(
+            "Account created successfully. A verification code was sent to your email.\n"
+            "After verification, Raster and Vector access will be enabled after payment validation."
+        ),
+    )
 
 
 @router.post("/login", response_model=AuthResponse)
-def login(payload: LoginRequest):
+def login(payload: LoginRequest, request: Request):
     """Authenticate a user/admin and return a JWT plus public profile."""
     cleanup_expired_unverified_users()
     login_value = payload.login.strip()
     password = payload.password.strip()
+    enforce_rate_limit(request, "login", login_value)
 
-    # Accept either username or email in the same login field.
     with get_db() as conn:
         user = conn.execute(
             """
@@ -146,50 +152,37 @@ def login(payload: LoginRequest):
             (login_value, login_value),
         ).fetchone()
 
-    if not user:
-        return AuthResponse(ok=False, message="Account not found.")
+    if not user or not verify_password(password, user["password_hash"]):
+        return AuthResponse(ok=False, message="Incorrect login or password.")
 
-    if not verify_password(password, user["password_hash"]):
-        return AuthResponse(ok=False, message="Incorrect password.")
+    if user.get("account_state", ACCOUNT_ACTIVE) != ACCOUNT_ACTIVE:
+        return AuthResponse(ok=False, message="This account is unavailable. Contact support for help.")
 
-    # Admins bypass email verification so the default admin can bootstrap the
-    # system even before SMTP is configured.
     if user["role"] != "admin" and not bool(user["email_verified"]):
         return AuthResponse(ok=False, message="Verify your email before signing in.")
 
-    token = create_access_token(
-        {
-            "sub": str(user["id"]),
-            "role": user["role"],
-        }
-    )
-
+    token = create_access_token({"sub": str(user["id"]), "role": user["role"]})
     public_user = user_to_public_dict(user)
 
-    # Return a message that explains the access level the user just received.
     if user["role"] == "admin":
-        msg = "Administrator sign-in successful."
+        message = "Administrator sign-in successful."
     elif user["status"] == STATUS_PAID:
-        msg = "Sign-in successful. Full access is enabled."
+        message = "Sign-in successful. Full access is enabled."
     elif user["status"] == STATUS_UNPAID:
-        msg = "Sign-in successful. Your account is unpaid, so Raster and Vector remain locked."
+        message = "Sign-in successful. Your account is unpaid, so Raster and Vector remain locked."
     else:
-        msg = "Sign-in successful. Your account is awaiting payment validation."
+        message = "Sign-in successful. Your account is awaiting payment validation."
 
-    return AuthResponse(
-        ok=True,
-        message=msg,
-        token=token,
-        user=public_user,
-    )
+    return AuthResponse(ok=True, message=message, token=token, user=public_user)
 
 
 @router.post("/verify-email", response_model=ApiResponse)
-def verify_email(payload: VerifyEmailRequest):
+def verify_email(payload: VerifyEmailRequest, request: Request):
     """Validate an email verification code and mark the account verified."""
     cleanup_expired_unverified_users()
     email = str(payload.email).strip().lower()
     code = payload.code.strip()
+    enforce_rate_limit(request, "verify_email", email)
 
     with get_db() as conn:
         user = conn.execute(
@@ -197,6 +190,7 @@ def verify_email(payload: VerifyEmailRequest):
             SELECT id, email_verification_code, email_verification_expires_at
             FROM app_users
             WHERE LOWER(email) = LOWER(%s)
+              AND account_state = 'active'
             """,
             (email,),
         ).fetchone()
@@ -205,25 +199,14 @@ def verify_email(payload: VerifyEmailRequest):
             return ApiResponse(ok=False, message="No account was found for this email address.")
 
         saved_code = user["email_verification_code"]
-        expires_at = user["email_verification_expires_at"]
-
+        expires_at = _normalized_timestamp(user["email_verification_expires_at"])
         if not saved_code or not expires_at:
             return ApiResponse(ok=False, message="No active code. Click 'Resend code'.")
-
-        now = datetime.now(timezone.utc)
-
-        # Normalize old/driver-returned naive timestamps before comparing with
-        # the timezone-aware current time.
-        if expires_at.tzinfo is None:
-            expires_at = expires_at.replace(tzinfo=timezone.utc)
-
-        if now > expires_at:
+        if datetime.now(timezone.utc) > expires_at:
             return ApiResponse(ok=False, message="The code has expired. Click 'Resend code'.")
-
         if code != saved_code:
             return ApiResponse(ok=False, message="Incorrect verification code.")
 
-        # Clear the code after successful verification so it cannot be reused.
         conn.execute(
             """
             UPDATE app_users
@@ -240,10 +223,11 @@ def verify_email(payload: VerifyEmailRequest):
 
 
 @router.post("/resend-code", response_model=ApiResponse)
-def resend_code(payload: ResendCodeRequest):
+def resend_code(payload: ResendCodeRequest, request: Request):
     """Generate and email a fresh verification code for an unverified user."""
     cleanup_expired_unverified_users()
     email = str(payload.email).strip().lower()
+    enforce_rate_limit(request, "resend_code", email)
     code, expires_at = generate_code()
 
     with get_db() as conn:
@@ -252,18 +236,16 @@ def resend_code(payload: ResendCodeRequest):
             SELECT id, username, email_verified
             FROM app_users
             WHERE LOWER(email) = LOWER(%s)
+              AND account_state = 'active'
             """,
             (email,),
         ).fetchone()
 
         if not user:
             return ApiResponse(ok=False, message="No account was found for this email address.")
-
         if bool(user["email_verified"]):
             return ApiResponse(ok=False, message="This email address is already verified.")
 
-        # Store the new code before sending email so a successful message always
-        # corresponds to the current database value.
         conn.execute(
             """
             UPDATE app_users
@@ -276,10 +258,89 @@ def resend_code(payload: ResendCodeRequest):
 
     try:
         EmailService().send_verification_code(email, user["username"], code)
-    except Exception as exc:
-        return ApiResponse(
-            ok=False,
-            message=f"Unable to send the verification email: {exc}",
-        )
+    except Exception:
+        logger.exception("Verification resend email delivery failed")
+        return ApiResponse(ok=False, message="Unable to send the verification email right now. Please try again later.")
 
     return ApiResponse(ok=True, message="A new verification code was sent to your email.")
+
+
+@router.post("/forgot-password", response_model=ApiResponse)
+def forgot_password(payload: ForgotPasswordRequest, request: Request):
+    """Send a reset code without revealing whether the account exists."""
+    email = str(payload.email).strip().lower()
+    enforce_rate_limit(request, "forgot_password", email)
+    code, expires_at = generate_code()
+
+    with get_db() as conn:
+        user = conn.execute(
+            """
+            SELECT id, username
+            FROM app_users
+            WHERE LOWER(email) = LOWER(%s)
+              AND account_state = 'active'
+            """,
+            (email,),
+        ).fetchone()
+        if user:
+            conn.execute(
+                """
+                UPDATE app_users
+                SET password_reset_code = %s,
+                    password_reset_expires_at = %s
+                WHERE id = %s
+                """,
+                (code, expires_at, user["id"]),
+            )
+
+    if user:
+        try:
+            EmailService().send_password_reset_code(email, user["username"], code)
+        except Exception:
+            logger.exception("Password-reset email delivery failed")
+
+    return ApiResponse(ok=True, message=RESET_MESSAGE)
+
+
+@router.post("/reset-password", response_model=ApiResponse)
+def reset_password(payload: ResetPasswordRequest, request: Request):
+    """Replace a password after validating its short-lived reset code."""
+    email = str(payload.email).strip().lower()
+    code = payload.code.strip()
+    enforce_rate_limit(request, "reset_password", email)
+
+    with get_db() as conn:
+        user = conn.execute(
+            """
+            SELECT id, password_reset_code, password_reset_expires_at
+            FROM app_users
+            WHERE LOWER(email) = LOWER(%s)
+              AND account_state = 'active'
+            """,
+            (email,),
+        ).fetchone()
+
+        if not user:
+            return ApiResponse(ok=False, message="The reset code is invalid or expired.")
+
+        expires_at = _normalized_timestamp(user["password_reset_expires_at"])
+        if (
+            not user["password_reset_code"]
+            or not expires_at
+            or datetime.now(timezone.utc) > expires_at
+            or not secrets.compare_digest(code, user["password_reset_code"])
+        ):
+            return ApiResponse(ok=False, message="The reset code is invalid or expired.")
+
+        conn.execute(
+            """
+            UPDATE app_users
+            SET password_hash = %s,
+                password_reset_code = NULL,
+                password_reset_expires_at = NULL
+            WHERE id = %s
+            """,
+            (hash_password(payload.new_password.strip()), user["id"]),
+        )
+
+    return ApiResponse(ok=True, message="Password updated successfully. You can now sign in.")

@@ -28,6 +28,11 @@ class EmailService:
         self.from_name = os.getenv("APP_SMTP_FROM_NAME", "GeoMapper Pro")
         self.from_email = os.getenv("APP_EMAIL_FROM_EMAIL") or self.smtp_email
         self.brevo_api_key = os.getenv("BREVO_API_KEY", "").strip()
+        self.support_email = os.getenv("SUPPORT_EMAIL", "progeomapper@gmail.com").strip()
+        self.password_reset_url = os.getenv(
+            "PASSWORD_RESET_URL",
+            f"{os.getenv('FRONTEND_URL', 'https://geomapper-pro.pages.dev').rstrip('/')}/#account",
+        ).strip()
 
     def send_verification_code(self, to_email: str, username: str, code: str) -> None:
         """Send a six-digit verification code to one account email address."""
@@ -40,10 +45,46 @@ class EmailService:
             "GeoMapper Pro\n"
         )
 
-        if self.brevo_api_key:
-            self._send_with_brevo(to_email, username, subject, text)
-            return
+        self._send_text(to_email, username, subject, text)
 
+    def send_password_reset_code(self, to_email: str, username: str, code: str) -> None:
+        """Send a short-lived password-reset code."""
+        subject = "GeoMapper Pro - Password reset code"
+        text = (
+            f"Hello {username},\n\n"
+            f"Your password reset code is: {code}\n\n"
+            "It expires in 10 minutes. If you did not request this change, "
+            "you can ignore this message.\n\n"
+            f"Open GeoMapper Pro password recovery: {self.password_reset_url}\n\n"
+            "Regards,\n"
+            "GeoMapper Pro\n"
+        )
+        self._send_text(to_email, username, subject, text)
+
+    def send_support_notification(
+        self,
+        name: str,
+        email: str,
+        category: str,
+        subject: str,
+        message: str,
+    ) -> None:
+        """Notify the support inbox after a website support request is stored."""
+        text = (
+            "A new GeoMapper Pro support request was submitted.\n\n"
+            f"Name: {name}\n"
+            f"Email: {email}\n"
+            f"Category: {category}\n"
+            f"Subject: {subject}\n\n"
+            f"{message}\n"
+        )
+        self._send_text(self.support_email, "GeoMapper Pro Support", f"[GeoMapper Pro] {subject}", text)
+
+    def _send_text(self, to_email: str, recipient_name: str, subject: str, text: str) -> None:
+        """Send one plain-text transactional email through the configured provider."""
+        if self.brevo_api_key:
+            self._send_with_brevo(to_email, recipient_name, subject, text)
+            return
         self._send_with_smtp(to_email, subject, text)
 
     def _send_with_brevo(
