@@ -202,8 +202,8 @@ def init_db():
         )
 
         release_channel = os.getenv("APP_RELEASE_CHANNEL", "stable").strip().lower() or "stable"
-        release_version = os.getenv("APP_LATEST_VERSION", "1.1.1").strip() or "1.1.1"
-        release_min_supported = os.getenv("APP_MIN_SUPPORTED_VERSION", "1.1.1").strip() or "1.1.1"
+        release_version = os.getenv("APP_LATEST_VERSION", "1.1.2").strip() or "1.1.2"
+        release_min_supported = os.getenv("APP_MIN_SUPPORTED_VERSION", "1.1.2").strip() or "1.1.2"
         default_download_url = os.getenv(
             "GEOMAPPER_DOWNLOAD_URL",
             "https://github.com/MOUHANEDXIX/geomapper-pro-downloads/releases/latest/download/GeoMapperProSetup.exe",
@@ -211,16 +211,16 @@ def init_db():
         release_download_url = os.getenv("APP_DOWNLOAD_URL", default_download_url).strip() or default_download_url
         release_notes = os.getenv(
             "APP_RELEASE_NOTES",
-            "GeoMapper Pro 1.1.1: fixes vector drag-and-drop validation, switches releases to a Windows installer, enforces required update prompts, and fixes the Windows taskbar icon for installed launches.",
+            "GeoMapper Pro 1.1.2: adds OTC reference-control calibration, improves polynomial inversion and Carthage UTM/STT conversions, and packages the calibration dataset in the Windows installer.",
         )
         release_sha256 = os.getenv(
             "APP_RELEASE_SHA256",
-            "31F2FFEE574A516A1133BE41ACDC4B021463145D2282EA23F16B63D966542F99",
+            "",
         ).strip() or None
         release_installer_filename = os.getenv("APP_INSTALLER_FILENAME", "GeoMapperProSetup.exe").strip() or "GeoMapperProSetup.exe"
-        installer_size_raw = os.getenv("APP_INSTALLER_SIZE_BYTES", "143207067").strip()
+        installer_size_raw = os.getenv("APP_INSTALLER_SIZE_BYTES", "").strip()
         release_installer_size = int(installer_size_raw) if installer_size_raw.isdigit() else None
-        release_required = os.getenv("APP_UPDATE_REQUIRED", "false").strip().lower() in {"1", "true", "yes"}
+        release_required = os.getenv("APP_UPDATE_REQUIRED", "true").strip().lower() in {"1", "true", "yes"}
 
         active_release = conn.execute(
             """
