@@ -11,6 +11,7 @@ from database import get_db
 from models import ApiResponse, AppReleaseUpdateRequest
 
 router = APIRouter(tags=["App updates"])
+PUBLIC_CHANGELOG_LIMIT = 2
 
 
 def _version_parts(value: str | None) -> tuple[int, ...]:
@@ -116,9 +117,9 @@ def app_changelog(channel: str = Query(default="stable")):
             FROM app_releases
             WHERE channel = %s
             ORDER BY published_at DESC, id DESC
-            LIMIT 50
+            LIMIT %s
             """,
-            (channel,),
+            (channel, PUBLIC_CHANGELOG_LIMIT),
         ).fetchall()
     return {
         "ok": True,
