@@ -202,8 +202,8 @@ def init_db():
         )
 
         release_channel = os.getenv("APP_RELEASE_CHANNEL", "stable").strip().lower() or "stable"
-        release_version = os.getenv("APP_LATEST_VERSION", "1.1.2").strip() or "1.1.2"
-        release_min_supported = os.getenv("APP_MIN_SUPPORTED_VERSION", "1.1.2").strip() or "1.1.2"
+        release_version = os.getenv("APP_LATEST_VERSION", "1.2").strip() or "1.2"
+        release_min_supported = os.getenv("APP_MIN_SUPPORTED_VERSION", "1.2").strip() or "1.2"
         default_download_url = os.getenv(
             "GEOMAPPER_DOWNLOAD_URL",
             "https://github.com/MOUHANEDXIX/geomapper-pro-downloads/releases/latest/download/GeoMapperProSetup.exe",
@@ -211,14 +211,14 @@ def init_db():
         release_download_url = os.getenv("APP_DOWNLOAD_URL", default_download_url).strip() or default_download_url
         release_notes = os.getenv(
             "APP_RELEASE_NOTES",
-            "GeoMapper Pro 1.1.2: adds OTC reference-control calibration, improves polynomial inversion and Carthage UTM/STT conversions, and packages the calibration dataset in the Windows installer.",
+            "GeoMapper Pro 1.2: adds integrated DWG import/export through the approved bundled ODA runtime, desktop forgotten-password recovery, spreadsheet-style coordinate editing, full-precision coordinate output, and more resilient raster loading and georeferencing workflows.",
         )
         release_sha256 = os.getenv(
             "APP_RELEASE_SHA256",
-            "",
+            "D8365C74A79422603FE8F64B2B258A5E846C0CB2EF7F64A04A1C4AA0D35EB97E",
         ).strip() or None
         release_installer_filename = os.getenv("APP_INSTALLER_FILENAME", "GeoMapperProSetup.exe").strip() or "GeoMapperProSetup.exe"
-        installer_size_raw = os.getenv("APP_INSTALLER_SIZE_BYTES", "").strip()
+        installer_size_raw = os.getenv("APP_INSTALLER_SIZE_BYTES", "197600461").strip()
         release_installer_size = int(installer_size_raw) if installer_size_raw.isdigit() else None
         release_required = os.getenv("APP_UPDATE_REQUIRED", "true").strip().lower() in {"1", "true", "yes"}
 
