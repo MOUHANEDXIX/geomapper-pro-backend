@@ -46,6 +46,9 @@ def _release_to_public(row: dict, current_version: str | None = None) -> dict:
         "download_url": row["download_url"],
         "release_notes": row.get("release_notes") or "",
         "sha256": row.get("sha256"),
+        "signature": row.get("signature"),
+        "signature_algorithm": row.get("signature_algorithm"),
+        "release_label": row.get("release_label") or f"GeoMapper Pro v{row['version']}",
         "installer_filename": row.get("installer_filename") or "GeoMapperProSetup.exe",
         "installer_size_bytes": row.get("installer_size_bytes"),
         "required": bool(row.get("required")) or below_minimum,
@@ -61,7 +64,8 @@ def get_active_release(channel: str = "stable") -> dict | None:
         row = conn.execute(
             """
             SELECT id, channel, version, min_supported_version, download_url,
-                   release_notes, sha256, installer_filename,
+                   release_notes, sha256, signature, signature_algorithm,
+                   release_label, installer_filename,
                    installer_size_bytes, required, published_at
             FROM app_releases
             WHERE channel = %s
@@ -78,7 +82,8 @@ def get_active_release(channel: str = "stable") -> dict | None:
         return conn.execute(
             """
             SELECT id, channel, version, min_supported_version, download_url,
-                   release_notes, sha256, installer_filename,
+                   release_notes, sha256, signature, signature_algorithm,
+                   release_label, installer_filename,
                    installer_size_bytes, required, published_at
             FROM app_releases
             WHERE channel = 'stable'
@@ -112,7 +117,8 @@ def app_changelog(channel: str = Query(default="stable")):
         rows = conn.execute(
             """
             SELECT id, channel, version, min_supported_version, download_url,
-                   release_notes, sha256, installer_filename,
+                   release_notes, sha256, signature, signature_algorithm,
+                   release_label, installer_filename,
                    installer_size_bytes, required, published_at
             FROM app_releases
             WHERE channel = %s
@@ -169,12 +175,15 @@ def admin_set_app_release(
                 download_url,
                 release_notes,
                 sha256,
+                signature,
+                signature_algorithm,
+                release_label,
                 installer_filename,
                 installer_size_bytes,
                 required,
                 is_active
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE)
             """,
             (
                 channel,
@@ -183,6 +192,9 @@ def admin_set_app_release(
                 payload.download_url.strip(),
                 payload.release_notes.strip(),
                 payload.sha256.strip() if payload.sha256 else None,
+                payload.signature.strip() if payload.signature else None,
+                payload.signature_algorithm.strip().lower() if payload.signature_algorithm else None,
+                payload.release_label.strip() if payload.release_label else None,
                 payload.installer_filename.strip() if payload.installer_filename else "GeoMapperProSetup.exe",
                 payload.installer_size_bytes,
                 bool(payload.required),

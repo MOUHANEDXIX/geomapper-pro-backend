@@ -76,6 +76,9 @@ class AppReleaseUpdateRequest(BaseModel):
     channel: str = Field(default="stable", min_length=1, max_length=40)
     min_supported_version: str | None = Field(default=None, max_length=40)
     sha256: str | None = Field(default=None, max_length=128)
+    signature: str | None = Field(default=None, max_length=512)
+    signature_algorithm: str | None = Field(default="ed25519-sha256", max_length=40)
+    release_label: str | None = Field(default=None, max_length=100)
     installer_filename: str | None = Field(default=None, max_length=180)
     installer_size_bytes: int | None = Field(default=None, ge=0)
     required: bool = False

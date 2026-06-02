@@ -156,6 +156,9 @@ def init_db():
                 download_url TEXT NOT NULL,
                 release_notes TEXT NOT NULL DEFAULT '',
                 sha256 TEXT,
+                signature TEXT,
+                signature_algorithm TEXT,
+                release_label TEXT,
                 installer_filename TEXT,
                 installer_size_bytes BIGINT,
                 required BOOLEAN NOT NULL DEFAULT FALSE,
@@ -167,6 +170,20 @@ def init_db():
         )
         conn.execute("ALTER TABLE app_releases ADD COLUMN IF NOT EXISTS installer_filename TEXT")
         conn.execute("ALTER TABLE app_releases ADD COLUMN IF NOT EXISTS installer_size_bytes BIGINT")
+        conn.execute("ALTER TABLE app_releases ADD COLUMN IF NOT EXISTS signature TEXT")
+        conn.execute("ALTER TABLE app_releases ADD COLUMN IF NOT EXISTS signature_algorithm TEXT")
+        conn.execute("ALTER TABLE app_releases ADD COLUMN IF NOT EXISTS release_label TEXT")
+        conn.execute(
+            """
+            UPDATE app_releases
+            SET release_label = CASE
+                WHEN version = '1.2.1' THEN 'GeoMapper Pro Beta v1.2.1'
+                ELSE release_label
+            END
+            WHERE version = '1.2.1'
+              AND (release_label IS NULL OR release_label = 'GeoMapper Pro v1.2.1')
+            """
+        )
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS support_messages (
@@ -202,30 +219,31 @@ def init_db():
         )
 
         release_channel = os.getenv("APP_RELEASE_CHANNEL", "stable").strip().lower() or "stable"
-        release_version = os.getenv("APP_LATEST_VERSION", "1.2.1").strip() or "1.2.1"
+        release_version = os.getenv("APP_LATEST_VERSION", "1.2.2").strip() or "1.2.2"
         release_min_supported = os.getenv("APP_MIN_SUPPORTED_VERSION", "1.2.1").strip() or "1.2.1"
         default_download_url = os.getenv(
             "GEOMAPPER_DOWNLOAD_URL",
-            "https://github.com/MOUHANEDXIX/geomapper-pro-downloads/releases/latest/download/GeoMapperProSetup.exe",
+            "https://github.com/MOUHANEDXIX/geomapper-pro-downloads/releases/download/v1.2.2-beta/GeoMapperProSetup.exe",
         ).strip()
         release_download_url = os.getenv("APP_DOWNLOAD_URL", default_download_url).strip() or default_download_url
         release_notes = os.getenv(
             "APP_RELEASE_NOTES",
-              "GeoMapper Pro 1.2.1: keeps only the latest two public releases, simplifies the website version page, and adds an explicit DWG representative path to the free browser vector preview.",
+            "GeoMapper Pro Beta 1.2.2: adds signed in-app Windows updates and full STT support in coordinate, raster, and vector workflows.",
         )
-        release_sha256 = os.getenv(
-            "APP_RELEASE_SHA256",
-              "6F7E47ECA9CC5FF90B0D415AEFFEA4CCC889B4C6646AB1DC83884B7EB94E3BEE",
-        ).strip() or None
+        release_sha256 = os.getenv("APP_RELEASE_SHA256", "").strip() or None
+        release_signature = os.getenv("APP_RELEASE_SIGNATURE", "").strip() or None
+        release_signature_algorithm = os.getenv("APP_RELEASE_SIGNATURE_ALGORITHM", "ed25519-sha256").strip().lower() or None
+        release_label = os.getenv("APP_RELEASE_LABEL", "GeoMapper Pro Beta v1.2.2").strip() or None
         release_installer_filename = os.getenv("APP_INSTALLER_FILENAME", "GeoMapperProSetup.exe").strip() or "GeoMapperProSetup.exe"
-        installer_size_raw = os.getenv("APP_INSTALLER_SIZE_BYTES", "197601101").strip()
+        installer_size_raw = os.getenv("APP_INSTALLER_SIZE_BYTES", "").strip()
         release_installer_size = int(installer_size_raw) if installer_size_raw.isdigit() else None
-        release_required = os.getenv("APP_UPDATE_REQUIRED", "true").strip().lower() in {"1", "true", "yes"}
+        release_required = os.getenv("APP_UPDATE_REQUIRED", "false").strip().lower() in {"1", "true", "yes"}
 
         active_release = conn.execute(
             """
             SELECT id, version, min_supported_version, download_url,
-                   release_notes, sha256, installer_filename,
+                   release_notes, sha256, signature, signature_algorithm,
+                   release_label, installer_filename,
                    installer_size_bytes, required
             FROM app_releases
             WHERE channel = %s
@@ -255,12 +273,15 @@ def init_db():
                     download_url,
                     release_notes,
                     sha256,
+                    signature,
+                    signature_algorithm,
+                    release_label,
                     installer_filename,
                     installer_size_bytes,
                     required,
                     is_active
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE)
                 """,
                 (
                     release_channel,
@@ -269,6 +290,9 @@ def init_db():
                     release_download_url,
                     release_notes,
                     release_sha256,
+                    release_signature,
+                    release_signature_algorithm,
+                    release_label,
                     release_installer_filename,
                     release_installer_size,
                     release_required,
@@ -280,6 +304,9 @@ def init_db():
                 or active_release.get("download_url") != release_download_url
                 or active_release.get("release_notes") != release_notes
                 or active_release.get("sha256") != release_sha256
+                or active_release.get("signature") != release_signature
+                or active_release.get("signature_algorithm") != release_signature_algorithm
+                or active_release.get("release_label") != release_label
                 or active_release.get("installer_filename") != release_installer_filename
                 or active_release.get("installer_size_bytes") != release_installer_size
                 or bool(active_release.get("required")) != release_required
@@ -292,6 +319,9 @@ def init_db():
                         download_url = %s,
                         release_notes = %s,
                         sha256 = %s,
+                        signature = %s,
+                        signature_algorithm = %s,
+                        release_label = %s,
                         installer_filename = %s,
                         installer_size_bytes = %s,
                         required = %s,
@@ -303,6 +333,9 @@ def init_db():
                         release_download_url,
                         release_notes,
                         release_sha256,
+                        release_signature,
+                        release_signature_algorithm,
+                        release_label,
                         release_installer_filename,
                         release_installer_size,
                         release_required,
