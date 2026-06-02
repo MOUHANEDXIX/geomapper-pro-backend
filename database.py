@@ -232,8 +232,12 @@ def init_db():
         )
         release_sha256 = os.getenv("APP_RELEASE_SHA256", "").strip() or None
         release_signature = os.getenv("APP_RELEASE_SIGNATURE", "").strip() or None
-        release_signature_algorithm = os.getenv("APP_RELEASE_SIGNATURE_ALGORITHM", "ed25519-sha256").strip().lower() or None
-        release_label = os.getenv("APP_RELEASE_LABEL", "GeoMapper Pro Beta v1.2.2").strip() or None
+        release_signature_algorithm = (
+            os.getenv("APP_RELEASE_SIGNATURE_ALGORITHM", "ed25519-sha256").strip().lower() or None
+            if release_signature
+            else None
+        )
+        release_label = os.getenv("APP_RELEASE_LABEL", f"GeoMapper Pro Beta v{release_version}").strip() or None
         release_installer_filename = os.getenv("APP_INSTALLER_FILENAME", "GeoMapperProSetup.exe").strip() or "GeoMapperProSetup.exe"
         installer_size_raw = os.getenv("APP_INSTALLER_SIZE_BYTES", "").strip()
         release_installer_size = int(installer_size_raw) if installer_size_raw.isdigit() else None
