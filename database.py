@@ -168,6 +168,38 @@ def init_db():
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS app_sessions (
+                id TEXT PRIMARY KEY,
+                user_id BIGINT NOT NULL REFERENCES app_users(id) ON DELETE CASCADE,
+                device_id TEXT,
+                device_name TEXT,
+                client_name TEXT,
+                app_version TEXT,
+                client_ip TEXT,
+                user_agent TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                revoked_at TIMESTAMPTZ,
+                revoked_reason TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS app_sessions_user_active_idx
+            ON app_sessions (user_id)
+            WHERE revoked_at IS NULL
+            """
+        )
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS app_sessions_one_active_user
+            ON app_sessions (user_id)
+            WHERE revoked_at IS NULL
+            """
+        )
         conn.execute("ALTER TABLE app_releases ADD COLUMN IF NOT EXISTS installer_filename TEXT")
         conn.execute("ALTER TABLE app_releases ADD COLUMN IF NOT EXISTS installer_size_bytes BIGINT")
         conn.execute("ALTER TABLE app_releases ADD COLUMN IF NOT EXISTS signature TEXT")
@@ -219,16 +251,16 @@ def init_db():
         )
 
         release_channel = os.getenv("APP_RELEASE_CHANNEL", "stable").strip().lower() or "stable"
-        release_version = os.getenv("APP_LATEST_VERSION", "1.2.2").strip() or "1.2.2"
-        release_min_supported = os.getenv("APP_MIN_SUPPORTED_VERSION", "1.2.1").strip() or "1.2.1"
+        release_version = os.getenv("APP_LATEST_VERSION", "1.2.3").strip() or "1.2.3"
+        release_min_supported = os.getenv("APP_MIN_SUPPORTED_VERSION", "1.2.2").strip() or "1.2.2"
         default_download_url = os.getenv(
             "GEOMAPPER_DOWNLOAD_URL",
-            "https://github.com/MOUHANEDXIX/geomapper-pro-downloads/releases/download/v1.2.2-beta/GeoMapperProSetup.exe",
+            "https://github.com/MOUHANEDXIX/geomapper-pro-downloads/releases/download/v1.2.3-beta/GeoMapperProSetup.exe",
         ).strip()
         release_download_url = os.getenv("APP_DOWNLOAD_URL", default_download_url).strip() or default_download_url
         release_notes = os.getenv(
             "APP_RELEASE_NOTES",
-            "GeoMapper Pro Beta 1.2.2: adds signed in-app Windows updates and full STT support in coordinate, raster, and vector workflows.",
+            "GeoMapper Pro Beta 1.2.3: enforces one-machine account sessions with privacy warnings on replaced logins.",
         )
         release_sha256 = os.getenv("APP_RELEASE_SHA256", "").strip() or None
         release_signature = os.getenv("APP_RELEASE_SIGNATURE", "").strip() or None

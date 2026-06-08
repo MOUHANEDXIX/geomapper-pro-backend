@@ -27,7 +27,7 @@ from website_routes import router as website_router
 
 app = FastAPI(
     title="GeoMapper Pro Backend",
-    version="1.2.2",
+    version="1.2.3",
 )
 
 logger = logging.getLogger(__name__)

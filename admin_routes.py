@@ -20,6 +20,12 @@ VALID_STATUSES = {
     "unpaid",
 }
 
+SESSION_REPLACED_DETAIL = (
+    "This account is already open on another machine. "
+    "For your privacy, this session was closed because the account can only be used on one machine at a time."
+)
+SESSION_INVALID_DETAIL = "Your account session is no longer valid. Sign in again."
+
 
 def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
@@ -29,27 +35,53 @@ def get_current_user(
     payload = decode_access_token(token)
 
     user_id = payload.get("sub")
+    session_id = payload.get("sid")
 
-    if not user_id:
+    if not user_id or not session_id:
         raise HTTPException(status_code=401, detail="Invalid or expired token.")
 
     # The token only stores a user ID, so load fresh role/status information on
-    # every protected request.
+    # every protected request. The session ID enforces one active machine.
     with get_db() as conn:
         user = conn.execute(
             """
-            SELECT id, username, email, role, status, account_state,
-                   payment_plan, requested_plan, email_verified, avatar_path, created_at
-            FROM app_users
-            WHERE id = %s
+            SELECT u.id, u.username, u.email, u.role, u.status, u.account_state,
+                   u.payment_plan, u.requested_plan, u.email_verified,
+                   u.avatar_path, u.created_at,
+                   s.id AS session_id,
+                   s.revoked_at AS session_revoked_at,
+                   s.revoked_reason AS session_revoked_reason
+            FROM app_users u
+            LEFT JOIN app_sessions s
+              ON s.id = %s
+             AND s.user_id = u.id
+            WHERE u.id = %s
             """,
-            (int(user_id),),
+            (str(session_id), int(user_id)),
         ).fetchone()
 
-    if not user:
-        raise HTTPException(status_code=401, detail="User not found.")
-    if user.get("account_state", "active") != "active":
-        raise HTTPException(status_code=401, detail="Account is unavailable.")
+        if not user:
+            raise HTTPException(status_code=401, detail="User not found.")
+        if not user.get("session_id"):
+            raise HTTPException(status_code=401, detail=SESSION_INVALID_DETAIL)
+        if user.get("session_revoked_at"):
+            detail = (
+                SESSION_REPLACED_DETAIL
+                if user.get("session_revoked_reason") == "replaced_by_new_login"
+                else SESSION_INVALID_DETAIL
+            )
+            raise HTTPException(status_code=401, detail=detail)
+        if user.get("account_state", "active") != "active":
+            raise HTTPException(status_code=401, detail="Account is unavailable.")
+
+        conn.execute(
+            """
+            UPDATE app_sessions
+            SET last_seen_at = NOW()
+            WHERE id = %s
+            """,
+            (str(session_id),),
+        )
 
     return user
 

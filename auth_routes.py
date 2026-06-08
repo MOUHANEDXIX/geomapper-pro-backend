@@ -6,9 +6,10 @@ import logging
 import secrets
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from access_policy import active_plan_code
+from admin_routes import get_current_user
 from database import cleanup_expired_unverified_users, get_db
 from email_service import EmailService
 from models import (
@@ -32,6 +33,10 @@ STATUS_PAID = "paid"
 STATUS_UNPAID = "unpaid"
 ACCOUNT_ACTIVE = "active"
 RESET_MESSAGE = "If this email exists, a password reset message has been sent."
+ONE_MACHINE_NOTICE = (
+    " For privacy, this account can be used on one machine at a time. "
+    "The previous open session was closed."
+)
 
 
 def generate_code() -> tuple[str, datetime]:
@@ -64,6 +69,71 @@ def _normalized_timestamp(value: datetime | None) -> datetime | None:
     if value and value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value
+
+
+def _session_text(value: str | None, fallback: str, limit: int) -> str:
+    """Clean short device/session labels before storing them."""
+    text = str(value or "").strip() or fallback
+    return text[:limit]
+
+
+def _create_login_session(conn, user: dict, payload: LoginRequest, request: Request) -> tuple[str, bool]:
+    """Create the only active session for this account and revoke older ones."""
+    user_id = int(user["id"])
+    session_id = secrets.token_urlsafe(32)
+    client_host = request.client.host if request.client else None
+    app_version = request.headers.get("X-GeoMapper-App-Version")
+    user_agent = request.headers.get("User-Agent")
+
+    # Serialize login for this user so the partial unique index cannot race.
+    conn.execute("SELECT pg_advisory_xact_lock(%s)", (user_id,))
+    previous = conn.execute(
+        """
+        SELECT id
+        FROM app_sessions
+        WHERE user_id = %s
+          AND revoked_at IS NULL
+        LIMIT 1
+        FOR UPDATE
+        """,
+        (user_id,),
+    ).fetchone()
+    conn.execute(
+        """
+        UPDATE app_sessions
+        SET revoked_at = NOW(),
+            revoked_reason = 'replaced_by_new_login'
+        WHERE user_id = %s
+          AND revoked_at IS NULL
+        """,
+        (user_id,),
+    )
+    conn.execute(
+        """
+        INSERT INTO app_sessions (
+            id,
+            user_id,
+            device_id,
+            device_name,
+            client_name,
+            app_version,
+            client_ip,
+            user_agent
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        """,
+        (
+            session_id,
+            user_id,
+            _session_text(payload.device_id, "unknown-device", 120),
+            _session_text(payload.device_name, "Unknown machine", 180),
+            _session_text(payload.client_name, "GeoMapper Pro", 80),
+            _session_text(app_version, "", 40) or None,
+            _session_text(client_host, "", 80) or None,
+            _session_text(user_agent, "", 500) or None,
+        ),
+    )
+    return session_id, bool(previous)
 
 
 @router.post("/register", response_model=ApiResponse)
@@ -161,7 +231,10 @@ def login(payload: LoginRequest, request: Request):
     if user["role"] != "admin" and not bool(user["email_verified"]):
         return AuthResponse(ok=False, message="Verify your email before signing in.")
 
-    token = create_access_token({"sub": str(user["id"]), "role": user["role"]})
+    with get_db() as conn:
+        session_id, replaced_session = _create_login_session(conn, user, payload, request)
+
+    token = create_access_token({"sub": str(user["id"]), "role": user["role"], "sid": session_id})
     public_user = user_to_public_dict(user)
 
     if user["role"] == "admin":
@@ -173,7 +246,29 @@ def login(payload: LoginRequest, request: Request):
     else:
         message = "Sign-in successful. Your account is awaiting payment validation."
 
+    if replaced_session:
+        message += ONE_MACHINE_NOTICE
+
     return AuthResponse(ok=True, message=message, token=token, user=public_user)
+
+
+@router.post("/logout", response_model=ApiResponse)
+def logout(current_user: dict = Depends(get_current_user)):
+    """Revoke the current server-side session."""
+    session_id = current_user.get("session_id")
+    if session_id:
+        with get_db() as conn:
+            conn.execute(
+                """
+                UPDATE app_sessions
+                SET revoked_at = NOW(),
+                    revoked_reason = 'logout'
+                WHERE id = %s
+                  AND revoked_at IS NULL
+                """,
+                (session_id,),
+            )
+    return ApiResponse(ok=True, message="Signed out successfully.")
 
 
 @router.post("/verify-email", response_model=ApiResponse)

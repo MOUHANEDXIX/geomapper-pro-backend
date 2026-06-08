@@ -18,6 +18,9 @@ class LoginRequest(BaseModel):
 
     login: str = Field(min_length=1)
     password: str = Field(min_length=1)
+    device_id: str | None = Field(default=None, max_length=120)
+    device_name: str | None = Field(default=None, max_length=180)
+    client_name: str | None = Field(default=None, max_length=80)
 
 
 class VerifyEmailRequest(BaseModel):
