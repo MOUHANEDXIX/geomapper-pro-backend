@@ -251,16 +251,16 @@ def init_db():
         )
 
         release_channel = os.getenv("APP_RELEASE_CHANNEL", "stable").strip().lower() or "stable"
-        release_version = os.getenv("APP_LATEST_VERSION", "1.2.3").strip() or "1.2.3"
-        release_min_supported = os.getenv("APP_MIN_SUPPORTED_VERSION", "1.2.2").strip() or "1.2.2"
+        release_version = os.getenv("APP_LATEST_VERSION", "1.2.4").strip() or "1.2.4"
+        release_min_supported = os.getenv("APP_MIN_SUPPORTED_VERSION", "1.2.3").strip() or "1.2.3"
         default_download_url = os.getenv(
             "GEOMAPPER_DOWNLOAD_URL",
-            "https://github.com/MOUHANEDXIX/geomapper-pro-downloads/releases/download/v1.2.3-beta/GeoMapperProSetup.exe",
+            "https://github.com/MOUHANEDXIX/geomapper-pro-downloads/releases/download/v1.2.4-beta/GeoMapperProSetup.exe",
         ).strip()
         release_download_url = os.getenv("APP_DOWNLOAD_URL", default_download_url).strip() or default_download_url
         release_notes = os.getenv(
             "APP_RELEASE_NOTES",
-            "GeoMapper Pro Beta 1.2.3: enforces one-machine account sessions with privacy warnings on replaced logins.",
+            "GeoMapper Pro Beta 1.2.4: adds Google Earth visualization for transformed coordinates and retries update checks while the backend wakes up.",
         )
         release_sha256 = os.getenv("APP_RELEASE_SHA256", "").strip() or None
         release_signature = os.getenv("APP_RELEASE_SIGNATURE", "").strip() or None
