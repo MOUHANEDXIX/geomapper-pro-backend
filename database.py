@@ -342,6 +342,11 @@ def init_db():
         )
         conn.execute(
             """
+            DROP FUNCTION IF EXISTS expire_old_subscriptions()
+            """
+        )
+        conn.execute(
+            """
             CREATE OR REPLACE FUNCTION expire_old_subscriptions()
             RETURNS INTEGER AS $$
             DECLARE
