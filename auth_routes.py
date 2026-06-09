@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
-from access_policy import active_plan_code
+from access_policy import active_plan_code, can_access_module, days_remaining
 from admin_routes import get_current_user
 from database import cleanup_expired_unverified_users, get_db
 from email_service import EmailService
@@ -29,6 +29,7 @@ router = APIRouter(prefix="/auth", tags=["Auth"])
 logger = logging.getLogger(__name__)
 
 STATUS_AWAITING = "awaiting_payment"
+STATUS_APPROVED = "approved"
 STATUS_PAID = "paid"
 STATUS_UNPAID = "unpaid"
 ACCOUNT_ACTIVE = "active"
@@ -58,6 +59,18 @@ def user_to_public_dict(user: dict) -> dict:
         "payment_plan": user.get("payment_plan") or "free",
         "requested_plan": user.get("requested_plan"),
         "active_plan": active_plan_code(user),
+        "stored_active_plan": user.get("active_plan") or "free",
+        "subscription_status": user.get("subscription_status") or "inactive",
+        "subscription_started_at": _iso_timestamp(user.get("subscription_started_at")),
+        "subscription_expires_at": _iso_timestamp(user.get("subscription_expires_at")),
+        "last_payment_id": user.get("last_payment_id"),
+        "days_remaining": days_remaining(user),
+        "modules": {
+            "coordinates": can_access_module(user, "coordinates"),
+            "raster": can_access_module(user, "raster"),
+            "vector": can_access_module(user, "vector"),
+            "ai": can_access_module(user, "ai"),
+        },
         "email_verified": bool(user["email_verified"]),
         "avatar_path": user.get("avatar_path"),
         "created_at": user["created_at"].isoformat() if user.get("created_at") else None,
@@ -69,6 +82,11 @@ def _normalized_timestamp(value: datetime | None) -> datetime | None:
     if value and value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value
+
+
+def _iso_timestamp(value: datetime | None) -> str | None:
+    value = _normalized_timestamp(value)
+    return value.isoformat() if value else None
 
 
 def _session_text(value: str | None, fallback: str, limit: int) -> str:
@@ -239,8 +257,14 @@ def login(payload: LoginRequest, request: Request):
 
     if user["role"] == "admin":
         message = "Administrator sign-in successful."
-    elif user["status"] == STATUS_PAID:
-        message = "Sign-in successful. Full access is enabled."
+    elif can_access_module(user, "vector"):
+        message = "Sign-in successful. Pro access is active."
+    elif can_access_module(user, "raster"):
+        message = "Sign-in successful. Plus access is active."
+    elif user.get("subscription_status") == "expired":
+        message = "Sign-in successful. Your subscription has expired."
+    elif user["status"] in {STATUS_PAID, STATUS_APPROVED}:
+        message = "Sign-in successful. No active paid subscription was found."
     elif user["status"] == STATUS_UNPAID:
         message = "Sign-in successful. Your account is unpaid, so Raster and Vector remain locked."
     else:

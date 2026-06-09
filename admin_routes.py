@@ -8,7 +8,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from database import get_db
 from models import ApiResponse, StatusUpdateRequest
 from security import decode_access_token
-from access_policy import active_plan_code
+from access_policy import active_plan_code, can_access_module, days_remaining
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
 
@@ -16,6 +16,7 @@ bearer_scheme = HTTPBearer()
 
 VALID_STATUSES = {
     "awaiting_payment",
+    "approved",
     "paid",
     "unpaid",
 }
@@ -46,8 +47,10 @@ def get_current_user(
         user = conn.execute(
             """
             SELECT u.id, u.username, u.email, u.role, u.status, u.account_state,
-                   u.payment_plan, u.requested_plan, u.email_verified,
-                   u.avatar_path, u.created_at,
+                   u.payment_plan, u.requested_plan, u.active_plan,
+                   u.subscription_status, u.subscription_started_at,
+                   u.subscription_expires_at, u.last_payment_id,
+                   u.email_verified, u.avatar_path, u.created_at,
                    s.id AS session_id,
                    s.revoked_at AS session_revoked_at,
                    s.revoked_reason AS session_revoked_reason
@@ -106,6 +109,18 @@ def public_user(user: dict) -> dict:
         "payment_plan": user.get("payment_plan") or "free",
         "requested_plan": user.get("requested_plan"),
         "active_plan": active_plan_code(user),
+        "stored_active_plan": user.get("active_plan") or "free",
+        "subscription_status": user.get("subscription_status") or "inactive",
+        "subscription_started_at": user["subscription_started_at"].isoformat() if user.get("subscription_started_at") else None,
+        "subscription_expires_at": user["subscription_expires_at"].isoformat() if user.get("subscription_expires_at") else None,
+        "last_payment_id": user.get("last_payment_id"),
+        "days_remaining": days_remaining(user),
+        "modules": {
+            "coordinates": can_access_module(user, "coordinates"),
+            "raster": can_access_module(user, "raster"),
+            "vector": can_access_module(user, "vector"),
+            "ai": can_access_module(user, "ai"),
+        },
         "email_verified": bool(user["email_verified"]),
         "avatar_path": user.get("avatar_path"),
         "created_at": user["created_at"].isoformat() if user.get("created_at") else None,
@@ -119,7 +134,10 @@ def list_users(_: dict = Depends(require_admin)):
         rows = conn.execute(
             """
             SELECT id, username, email, role, status, account_state,
-                   payment_plan, requested_plan, email_verified, avatar_path, created_at
+                   payment_plan, requested_plan, active_plan,
+                   subscription_status, subscription_started_at,
+                   subscription_expires_at, last_payment_id,
+                   email_verified, avatar_path, created_at
             FROM app_users
             ORDER BY id ASC
             """
@@ -143,6 +161,8 @@ def update_user_status(
 
     if status not in VALID_STATUSES:
         return ApiResponse(ok=False, message="Invalid status.")
+    if status in {"paid", "approved"}:
+        return ApiResponse(ok=False, message="Approve a payment instead. Subscriptions are activated by the database trigger.")
     if payment_plan and payment_plan not in {"free", "plus", "pro"}:
         return ApiResponse(ok=False, message="Invalid plan.")
 
@@ -170,13 +190,11 @@ def update_user_status(
             SET status = %s,
                 payment_plan = CASE
                     WHEN %s <> '' THEN %s
-                    WHEN %s = 'paid' AND requested_plan IN ('plus', 'pro') THEN requested_plan
-                    WHEN %s = 'paid' AND payment_plan = 'free' THEN 'plus'
                     ELSE payment_plan
                 END
             WHERE id = %s
             """,
-            (status, payment_plan, payment_plan, status, status, user_id),
+            (status, payment_plan, payment_plan, user_id),
         )
 
     return ApiResponse(ok=True, message=f"Status updated: {status}")

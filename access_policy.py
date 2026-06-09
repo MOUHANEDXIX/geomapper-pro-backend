@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import datetime, timezone
 
 
 PLAN_CATALOG = {
@@ -19,6 +20,7 @@ PLAN_CATALOG = {
             "raster": False,
             "raster_georeferencing": False,
             "vector": False,
+            "ai": False,
             "online_demos": True,
             "download": True,
         },
@@ -39,7 +41,8 @@ PLAN_CATALOG = {
             "coordinates": True,
             "raster": True,
             "raster_georeferencing": True,
-            "vector": True,
+            "vector": False,
+            "ai": False,
             "online_demos": True,
             "download": True,
         },
@@ -60,6 +63,7 @@ PLAN_CATALOG = {
             "raster": True,
             "raster_georeferencing": True,
             "vector": True,
+            "ai": True,
             "online_demos": True,
             "download": True,
         },
@@ -81,6 +85,7 @@ PLAN_CATALOG = {
             "raster": True,
             "raster_georeferencing": True,
             "vector": True,
+            "ai": True,
             "online_demos": True,
             "download": True,
         },
@@ -95,18 +100,66 @@ def public_plans() -> list[dict]:
 
 
 def active_plan_code(user: dict) -> str:
-    """Map legacy payment status and optional selected plan to one plan code."""
+    """Return the currently usable plan code for module access."""
     if user.get("role") == "admin":
         return "admin"
 
     if user.get("account_state", "active") != "active":
         return "free"
 
-    if user.get("status") != "paid":
+    active_plan = str(user.get("active_plan") or "").strip().lower()
+    if active_plan in {"plus", "pro"}:
+        return active_plan if is_subscription_active(user) else "free"
+    if active_plan == "free":
         return "free"
 
+    # Legacy compatibility for accounts created before subscription columns.
+    if user.get("status") != "paid":
+        return "free"
     selected = str(user.get("payment_plan") or "").strip().lower()
     return selected if selected in {"plus", "pro"} else "plus"
+
+
+def is_subscription_active(user: dict) -> bool:
+    """Return True when a paid user has a non-expired active subscription."""
+
+    if user.get("role") == "admin":
+        return True
+
+    plan = str(user.get("active_plan") or "").strip().lower()
+    if plan == "free":
+        return False
+    if plan not in {"plus", "pro"}:
+        return False
+    if str(user.get("subscription_status") or "").strip().lower() != "active":
+        return False
+    expires_at = _parse_datetime(user.get("subscription_expires_at"))
+    return bool(expires_at and expires_at > datetime.now(timezone.utc))
+
+
+def can_access_module(user: dict, module_name: str) -> bool:
+    """Return whether the user can open a named module right now."""
+
+    plan_code = active_plan_code(user)
+    plan = PLAN_CATALOG.get(plan_code, PLAN_CATALOG["free"])
+    return bool(plan["modules"].get(module_name, False))
+
+
+def days_remaining(user: dict) -> int:
+    """Return whole remaining subscription days, never negative."""
+
+    expires_at = _parse_datetime(user.get("subscription_expires_at"))
+    if not expires_at:
+        return 0
+    seconds = (expires_at - datetime.now(timezone.utc)).total_seconds()
+    return max(0, int(seconds // 86400))
+
+
+def unlocked_modules(user: dict) -> list[str]:
+    """Return module codes available for the user's current plan."""
+
+    plan = PLAN_CATALOG.get(active_plan_code(user), PLAN_CATALOG["free"])
+    return [code for code, allowed in plan["modules"].items() if allowed]
 
 
 def dashboard_for_user(user: dict) -> dict:
@@ -128,10 +181,39 @@ def dashboard_for_user(user: dict) -> dict:
         "account_state": user.get("account_state") or "active",
         "payment_status": user.get("status") or "awaiting_payment",
         "active_plan": plan_code,
+        "stored_active_plan": user.get("active_plan") or "free",
+        "subscription_status": user.get("subscription_status") or "inactive",
+        "subscription_started_at": _iso_datetime(user.get("subscription_started_at")),
+        "subscription_expires_at": _iso_datetime(user.get("subscription_expires_at")),
+        "days_remaining": days_remaining(user),
         "requested_plan": user.get("requested_plan"),
+        "last_payment_id": user.get("last_payment_id"),
         "email_verified": bool(user.get("email_verified")),
         "avatar_path": user.get("avatar_path"),
         "created_at": user["created_at"].isoformat() if user.get("created_at") else None,
         "support_level": plan["support_level"],
         "module_access": modules,
+        "unlocked_modules": unlocked_modules(user),
     }
+
+
+def _parse_datetime(value) -> datetime | None:
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _iso_datetime(value) -> str | None:
+    parsed = _parse_datetime(value)
+    return parsed.isoformat() if parsed else None

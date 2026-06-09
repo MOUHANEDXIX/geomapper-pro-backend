@@ -125,9 +125,268 @@ def init_db():
         conn.execute("ALTER TABLE app_users ADD COLUMN IF NOT EXISTS account_state TEXT NOT NULL DEFAULT 'active'")
         conn.execute("ALTER TABLE app_users ADD COLUMN IF NOT EXISTS payment_plan TEXT NOT NULL DEFAULT 'free'")
         conn.execute("ALTER TABLE app_users ADD COLUMN IF NOT EXISTS requested_plan TEXT")
+        conn.execute("ALTER TABLE app_users ADD COLUMN IF NOT EXISTS active_plan TEXT NOT NULL DEFAULT 'free'")
+        conn.execute("ALTER TABLE app_users ADD COLUMN IF NOT EXISTS subscription_status TEXT NOT NULL DEFAULT 'inactive'")
+        conn.execute("ALTER TABLE app_users ADD COLUMN IF NOT EXISTS subscription_started_at TIMESTAMPTZ")
+        conn.execute("ALTER TABLE app_users ADD COLUMN IF NOT EXISTS subscription_expires_at TIMESTAMPTZ")
+        conn.execute("ALTER TABLE app_users ADD COLUMN IF NOT EXISTS last_payment_id BIGINT")
         conn.execute("ALTER TABLE app_users ADD COLUMN IF NOT EXISTS password_reset_code TEXT")
         conn.execute("ALTER TABLE app_users ADD COLUMN IF NOT EXISTS password_reset_expires_at TIMESTAMPTZ")
         conn.execute("ALTER TABLE app_users ADD COLUMN IF NOT EXISTS deactivated_at TIMESTAMPTZ")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS plans (
+                id BIGSERIAL PRIMARY KEY,
+                code TEXT NOT NULL UNIQUE,
+                name TEXT NOT NULL,
+                price_tnd NUMERIC(10, 2) NOT NULL DEFAULT 0,
+                duration_days INTEGER NOT NULL DEFAULT 30,
+                modules JSONB NOT NULL DEFAULT '{}'::jsonb,
+                active BOOLEAN NOT NULL DEFAULT TRUE,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO plans (code, name, price_tnd, duration_days, modules, active)
+            VALUES
+                ('free', 'Free', 0, 0, '{"coordinates": true, "raster": false, "vector": false, "ai": false}'::jsonb, TRUE),
+                ('plus', 'Plus', 100, 30, '{"coordinates": true, "raster": true, "vector": false, "ai": false}'::jsonb, TRUE),
+                ('pro', 'Pro', 200, 30, '{"coordinates": true, "raster": true, "vector": true, "ai": true}'::jsonb, TRUE)
+            ON CONFLICT (code) DO UPDATE
+            SET name = EXCLUDED.name,
+                price_tnd = EXCLUDED.price_tnd,
+                duration_days = EXCLUDED.duration_days,
+                modules = EXCLUDED.modules,
+                active = EXCLUDED.active
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS payments (
+                id BIGSERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL REFERENCES app_users(id) ON DELETE CASCADE,
+                plan_code TEXT NOT NULL REFERENCES plans(code),
+                amount NUMERIC(10, 2) NOT NULL,
+                currency TEXT NOT NULL DEFAULT 'TND',
+                payment_method TEXT NOT NULL DEFAULT 'bank_transfer',
+                bank_reference TEXT NOT NULL UNIQUE,
+                proof_url TEXT,
+                status TEXT NOT NULL DEFAULT 'pending',
+                paid_at TIMESTAMPTZ,
+                approved_at TIMESTAMPTZ,
+                approved_by BIGINT REFERENCES app_users(id),
+                notes TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS payments_user_status_idx
+            ON payments (user_id, status, plan_code)
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS subscriptions (
+                id BIGSERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL REFERENCES app_users(id) ON DELETE CASCADE,
+                plan_code TEXT NOT NULL REFERENCES plans(code),
+                payment_id BIGINT REFERENCES payments(id),
+                status TEXT NOT NULL DEFAULT 'active',
+                current_period_start TIMESTAMPTZ NOT NULL,
+                current_period_end TIMESTAMPTZ NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS subscription_logs (
+                id BIGSERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL REFERENCES app_users(id) ON DELETE CASCADE,
+                event_type TEXT NOT NULL,
+                old_value JSONB,
+                new_value JSONB,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE OR REPLACE FUNCTION set_payment_approval_timestamp()
+            RETURNS TRIGGER AS $$
+            BEGIN
+                IF NEW.status = 'approved'
+                   AND OLD.status IS DISTINCT FROM 'approved'
+                   AND NEW.approved_at IS NULL THEN
+                    NEW.approved_at := NOW();
+                END IF;
+                RETURN NEW;
+            END;
+            $$ LANGUAGE plpgsql
+            """
+        )
+        conn.execute(
+            """
+            DROP TRIGGER IF EXISTS trg_set_payment_approval_timestamp ON payments
+            """
+        )
+        conn.execute(
+            """
+            CREATE TRIGGER trg_set_payment_approval_timestamp
+            BEFORE UPDATE OF status ON payments
+            FOR EACH ROW
+            EXECUTE FUNCTION set_payment_approval_timestamp()
+            """
+        )
+        conn.execute(
+            """
+            CREATE OR REPLACE FUNCTION activate_subscription_after_payment()
+            RETURNS TRIGGER AS $$
+            DECLARE
+                plan_days INTEGER;
+                period_start TIMESTAMPTZ;
+                period_end TIMESTAMPTZ;
+                previous_user JSONB;
+            BEGIN
+                IF NEW.status = 'approved'
+                   AND OLD.status IS DISTINCT FROM 'approved' THEN
+                    SELECT duration_days
+                    INTO plan_days
+                    FROM plans
+                    WHERE code = NEW.plan_code
+                      AND active = TRUE;
+
+                    IF plan_days IS NULL OR plan_days <= 0 THEN
+                        RAISE EXCEPTION 'Invalid subscription plan: %', NEW.plan_code;
+                    END IF;
+
+                    SELECT to_jsonb(u)
+                    INTO previous_user
+                    FROM app_users u
+                    WHERE u.id = NEW.user_id;
+
+                    SELECT CASE
+                        WHEN subscription_status = 'active'
+                             AND subscription_expires_at IS NOT NULL
+                             AND subscription_expires_at > NOW()
+                        THEN subscription_expires_at
+                        ELSE NOW()
+                    END
+                    INTO period_start
+                    FROM app_users
+                    WHERE id = NEW.user_id
+                    FOR UPDATE;
+
+                    period_end := period_start + make_interval(days => plan_days);
+
+                    INSERT INTO subscriptions (
+                        user_id,
+                        plan_code,
+                        payment_id,
+                        status,
+                        current_period_start,
+                        current_period_end
+                    )
+                    VALUES (
+                        NEW.user_id,
+                        NEW.plan_code,
+                        NEW.id,
+                        'active',
+                        period_start,
+                        period_end
+                    );
+
+                    UPDATE app_users
+                    SET status = 'approved',
+                        active_plan = NEW.plan_code,
+                        subscription_status = 'active',
+                        subscription_started_at = period_start,
+                        subscription_expires_at = period_end,
+                        last_payment_id = NEW.id
+                    WHERE id = NEW.user_id;
+
+                    INSERT INTO subscription_logs (user_id, event_type, old_value, new_value)
+                    VALUES (
+                        NEW.user_id,
+                        'payment_approved',
+                        previous_user,
+                        jsonb_build_object(
+                            'payment_id', NEW.id,
+                            'plan_code', NEW.plan_code,
+                            'current_period_start', period_start,
+                            'current_period_end', period_end
+                        )
+                    );
+                END IF;
+                RETURN NEW;
+            END;
+            $$ LANGUAGE plpgsql
+            """
+        )
+        conn.execute(
+            """
+            DROP TRIGGER IF EXISTS trg_activate_subscription_after_payment ON payments
+            """
+        )
+        conn.execute(
+            """
+            CREATE TRIGGER trg_activate_subscription_after_payment
+            AFTER UPDATE OF status ON payments
+            FOR EACH ROW
+            EXECUTE FUNCTION activate_subscription_after_payment()
+            """
+        )
+        conn.execute(
+            """
+            CREATE OR REPLACE FUNCTION expire_old_subscriptions()
+            RETURNS INTEGER AS $$
+            DECLARE
+                expired_count INTEGER;
+            BEGIN
+                WITH expired_users AS (
+                    UPDATE app_users
+                    SET subscription_status = 'expired',
+                        status = 'awaiting_payment',
+                        active_plan = 'free'
+                    WHERE role <> 'admin'
+                      AND subscription_status = 'active'
+                      AND subscription_expires_at IS NOT NULL
+                      AND subscription_expires_at <= NOW()
+                    RETURNING id, subscription_expires_at, last_payment_id
+                ),
+                expired_subscriptions AS (
+                    UPDATE subscriptions s
+                    SET status = 'expired'
+                    FROM expired_users u
+                    WHERE s.user_id = u.id
+                      AND s.status = 'active'
+                      AND s.current_period_end <= NOW()
+                    RETURNING s.id
+                ),
+                inserted_logs AS (
+                    INSERT INTO subscription_logs (user_id, event_type, old_value, new_value)
+                    SELECT
+                        id,
+                        'subscription_expired',
+                        NULL,
+                        jsonb_build_object(
+                            'subscription_expires_at', subscription_expires_at,
+                            'last_payment_id', last_payment_id
+                        )
+                    FROM expired_users
+                    RETURNING id
+                )
+                SELECT COUNT(*) INTO expired_count FROM expired_users;
+
+                RETURN expired_count;
+            END;
+            $$ LANGUAGE plpgsql
+            """
+        )
         conn.execute(
             """
             UPDATE app_users
@@ -141,7 +400,7 @@ def init_db():
             UPDATE app_users
             SET payment_plan = CASE
                 WHEN role = 'admin' THEN 'admin'
-                WHEN status = 'paid' AND payment_plan = 'free' THEN 'plus'
+                WHEN status IN ('paid', 'approved') AND payment_plan = 'free' THEN 'plus'
                 ELSE payment_plan
             END
             """
@@ -251,19 +510,25 @@ def init_db():
         )
 
         release_channel = os.getenv("APP_RELEASE_CHANNEL", "stable").strip().lower() or "stable"
-        release_version = os.getenv("APP_LATEST_VERSION", "1.2.4").strip() or "1.2.4"
-        release_min_supported = os.getenv("APP_MIN_SUPPORTED_VERSION", "1.2.3").strip() or "1.2.3"
+        release_version = os.getenv("APP_LATEST_VERSION", "1.2.5").strip() or "1.2.5"
+        release_min_supported = os.getenv("APP_MIN_SUPPORTED_VERSION", "1.2.4").strip() or "1.2.4"
         default_download_url = os.getenv(
             "GEOMAPPER_DOWNLOAD_URL",
-            "https://github.com/MOUHANEDXIX/geomapper-pro-downloads/releases/download/v1.2.4-beta/GeoMapperProSetup.exe",
+            "https://github.com/MOUHANEDXIX/geomapper-pro-downloads/releases/download/v1.2.5-beta/GeoMapperProSetup.exe",
         ).strip()
         release_download_url = os.getenv("APP_DOWNLOAD_URL", default_download_url).strip() or default_download_url
         release_notes = os.getenv(
             "APP_RELEASE_NOTES",
-            "GeoMapper Pro Beta 1.2.4: adds Google Earth visualization for transformed coordinates and retries update checks while the backend wakes up.",
+            "GeoMapper Pro Beta 1.2.5: adds local Ollama AI setup, manual bank-transfer subscriptions, smoother in-app notifications, and hardened module access.",
         )
-        release_sha256 = os.getenv("APP_RELEASE_SHA256", "").strip() or None
-        release_signature = os.getenv("APP_RELEASE_SIGNATURE", "").strip() or None
+        release_sha256 = os.getenv(
+            "APP_RELEASE_SHA256",
+            "AC5BB436CA477C78AC0917CE6558E71C34909A75EFCF534CFCF9CE3D6BE9D04B",
+        ).strip() or None
+        release_signature = os.getenv(
+            "APP_RELEASE_SIGNATURE",
+            "7IBDDty4CcGA3W3xnGa5DbLd/+9IMvSWB/GlBHu8VIZyCf12Hm1Cli6MGCiCzczhWF9L6x9RZZpZg5vomXPDCw==",
+        ).strip() or None
         release_signature_algorithm = (
             os.getenv("APP_RELEASE_SIGNATURE_ALGORITHM", "ed25519-sha256").strip().lower() or None
             if release_signature
@@ -271,7 +536,7 @@ def init_db():
         )
         release_label = os.getenv("APP_RELEASE_LABEL", f"GeoMapper Pro Beta v{release_version}").strip() or None
         release_installer_filename = os.getenv("APP_INSTALLER_FILENAME", "GeoMapperProSetup.exe").strip() or "GeoMapperProSetup.exe"
-        installer_size_raw = os.getenv("APP_INSTALLER_SIZE_BYTES", "").strip()
+        installer_size_raw = os.getenv("APP_INSTALLER_SIZE_BYTES", "203646368").strip()
         release_installer_size = int(installer_size_raw) if installer_size_raw.isdigit() else None
         release_required = os.getenv("APP_UPDATE_REQUIRED", "false").strip().lower() in {"1", "true", "yes"}
 
@@ -409,9 +674,11 @@ def init_default_admin():
                 """
                 UPDATE app_users
                 SET role = 'admin',
-                    status = 'paid',
+                    status = 'approved',
                     account_state = 'active',
                     payment_plan = 'admin',
+                    active_plan = 'admin',
+                    subscription_status = 'active',
                     email_verified = TRUE,
                     initial_email_verified = TRUE,
                     email_verification_code = NULL,
@@ -422,7 +689,7 @@ def init_default_admin():
             )
             return
 
-        # First-run bootstrap: insert the default admin with paid/full access.
+        # First-run bootstrap: insert the default admin with full access.
         conn.execute(
             """
             INSERT INTO app_users (
@@ -433,10 +700,12 @@ def init_default_admin():
                 status,
                 account_state,
                 payment_plan,
+                active_plan,
+                subscription_status,
                 email_verified,
                 initial_email_verified
             )
-            VALUES (%s, %s, %s, 'admin', 'paid', 'active', 'admin', TRUE, TRUE)
+            VALUES (%s, %s, %s, 'admin', 'approved', 'active', 'admin', 'admin', 'active', TRUE, TRUE)
             """,
             (username, email, password_hash),
         )

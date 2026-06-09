@@ -24,10 +24,11 @@ from rate_limit import enforce_rate_limit
 from security import hash_password, verify_password
 from update_routes import router as update_router
 from website_routes import router as website_router
+from payment_routes import router as payment_router
 
 app = FastAPI(
     title="GeoMapper Pro Backend",
-    version="1.2.4",
+    version="1.2.5",
 )
 
 logger = logging.getLogger(__name__)
@@ -204,7 +205,10 @@ def update_profile(
         updated_user = conn.execute(
             """
             SELECT id, username, email, role, status, account_state,
-                   payment_plan, requested_plan, email_verified, avatar_path, created_at
+                   payment_plan, requested_plan, active_plan,
+                   subscription_status, subscription_started_at,
+                   subscription_expires_at, last_payment_id,
+                   email_verified, avatar_path, created_at
             FROM app_users
             WHERE id = %s
             """,
@@ -303,5 +307,6 @@ def deactivate_account(
 
 app.include_router(auth_router)
 app.include_router(admin_router)
+app.include_router(payment_router)
 app.include_router(update_router)
 app.include_router(website_router)

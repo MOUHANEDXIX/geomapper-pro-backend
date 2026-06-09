@@ -135,6 +135,34 @@ class PlanRequest(BaseModel):
         return plan
 
 
+class PaymentRequestCreate(BaseModel):
+    """Payload for creating a manual bank-transfer payment request."""
+
+    plan_code: str = Field(min_length=1, max_length=20)
+    proof_url: str | None = Field(default=None, max_length=500)
+    notes: str | None = Field(default=None, max_length=1000)
+
+    @field_validator("plan_code")
+    @classmethod
+    def validate_plan_code(cls, value: str) -> str:
+        plan = value.strip().lower()
+        if plan not in {"plus", "pro"}:
+            raise ValueError("Choose Plus or Pro.")
+        return plan
+
+
+class PaymentRejectRequest(BaseModel):
+    """Payload for rejecting a pending/manual payment."""
+
+    notes: str = Field(default="", max_length=1000)
+
+
+class PaymentNoteRequest(BaseModel):
+    """Payload for changing an admin payment note."""
+
+    notes: str = Field(default="", max_length=1000)
+
+
 class SupportRequest(BaseModel):
     """Payload for the public support form."""
 
