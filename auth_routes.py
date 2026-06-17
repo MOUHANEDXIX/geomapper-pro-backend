@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
-from access_policy import active_plan_code, can_access_module, days_remaining
+from access_policy import active_plan_code, can_access_module, days_remaining, subscription_diagnostic
 from admin_routes import get_current_user
 from database import cleanup_expired_unverified_users, get_db
 from email_service import EmailService
@@ -54,7 +54,7 @@ def user_to_public_dict(user: dict) -> dict:
         "username": user["username"],
         "email": user["email"],
         "role": user["role"],
-        "status": user["status"],
+        "status": str(user["status"] or "").strip().lower() or STATUS_AWAITING,
         "account_state": user.get("account_state") or ACCOUNT_ACTIVE,
         "payment_plan": user.get("payment_plan") or "free",
         "requested_plan": user.get("requested_plan"),
@@ -64,6 +64,10 @@ def user_to_public_dict(user: dict) -> dict:
         "subscription_started_at": _iso_timestamp(user.get("subscription_started_at")),
         "subscription_expires_at": _iso_timestamp(user.get("subscription_expires_at")),
         "last_payment_id": user.get("last_payment_id"),
+        "pending_payment": bool(user.get("pending_payment")),
+        "latest_payment_id": user.get("latest_payment_id"),
+        "last_payment_status": user.get("last_payment_status"),
+        "subscription_warning": subscription_diagnostic(user),
         "days_remaining": days_remaining(user),
         "modules": {
             "coordinates": can_access_module(user, "coordinates"),
@@ -232,10 +236,27 @@ def login(payload: LoginRequest, request: Request):
     with get_db() as conn:
         user = conn.execute(
             """
-            SELECT *
-            FROM app_users
-            WHERE LOWER(username) = LOWER(%s)
-               OR LOWER(email) = LOWER(%s)
+            SELECT u.*,
+                   EXISTS (
+                       SELECT 1 FROM payments p
+                       WHERE p.user_id = u.id
+                         AND p.status = 'pending'
+                   ) AS pending_payment,
+                   (
+                       SELECT p.id FROM payments p
+                       WHERE p.user_id = u.id
+                       ORDER BY p.created_at DESC, p.id DESC
+                       LIMIT 1
+                   ) AS latest_payment_id,
+                   (
+                       SELECT p.status FROM payments p
+                       WHERE p.user_id = u.id
+                       ORDER BY p.created_at DESC, p.id DESC
+                       LIMIT 1
+                   ) AS last_payment_status
+            FROM app_users u
+            WHERE LOWER(u.username) = LOWER(%s)
+               OR LOWER(u.email) = LOWER(%s)
             """,
             (login_value, login_value),
         ).fetchone()
@@ -255,6 +276,7 @@ def login(payload: LoginRequest, request: Request):
     token = create_access_token({"sub": str(user["id"]), "role": user["role"], "sid": session_id})
     public_user = user_to_public_dict(user)
 
+    status = str(user.get("status") or "").strip().lower()
     if user["role"] == "admin":
         message = "Administrator sign-in successful."
     elif can_access_module(user, "vector"):
@@ -263,9 +285,9 @@ def login(payload: LoginRequest, request: Request):
         message = "Sign-in successful. Plus access is active."
     elif user.get("subscription_status") == "expired":
         message = "Sign-in successful. Your subscription has expired."
-    elif user["status"] in {STATUS_PAID, STATUS_APPROVED}:
+    elif status in {STATUS_PAID, STATUS_APPROVED}:
         message = "Sign-in successful. No active paid subscription was found."
-    elif user["status"] == STATUS_UNPAID:
+    elif status == STATUS_UNPAID:
         message = "Sign-in successful. Your account is unpaid, so Raster and Vector remain locked."
     else:
         message = "Sign-in successful. Your account is awaiting payment validation."

@@ -15,20 +15,21 @@ import logging
 from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
-from auth_routes import generate_code, router as auth_router, user_to_public_dict
+from auth_routes import generate_code, logout as auth_logout, router as auth_router, user_to_public_dict
 from admin_routes import get_current_user, router as admin_router
+from access_policy import dashboard_for_user
 from database import cleanup_expired_unverified_users, get_db, init_default_admin
 from email_service import EmailService
-from models import ChangePasswordRequest, DeactivateAccountRequest, ProfileUpdateRequest
+from models import ChangePasswordRequest, DeactivateAccountRequest, PaymentRequestCreate, ProfileUpdateRequest
 from rate_limit import enforce_rate_limit
 from security import hash_password, verify_password
 from update_routes import router as update_router
 from website_routes import router as website_router
-from payment_routes import router as payment_router
+from payment_routes import create_payment_request, my_payment_history, router as payment_router
 
 app = FastAPI(
     title="GeoMapper Pro Backend",
-    version="1.2.5",
+    version="1.2.8",
 )
 
 logger = logging.getLogger(__name__)
@@ -208,7 +209,24 @@ def update_profile(
                    payment_plan, requested_plan, active_plan,
                    subscription_status, subscription_started_at,
                    subscription_expires_at, last_payment_id,
-                   email_verified, avatar_path, created_at
+                   email_verified, avatar_path, created_at,
+                   EXISTS (
+                       SELECT 1 FROM payments p
+                       WHERE p.user_id = app_users.id
+                         AND p.status = 'pending'
+                   ) AS pending_payment,
+                   (
+                       SELECT p.id FROM payments p
+                       WHERE p.user_id = app_users.id
+                       ORDER BY p.created_at DESC, p.id DESC
+                       LIMIT 1
+                   ) AS latest_payment_id,
+                   (
+                       SELECT p.status FROM payments p
+                       WHERE p.user_id = app_users.id
+                       ORDER BY p.created_at DESC, p.id DESC
+                       LIMIT 1
+                   ) AS last_payment_status
             FROM app_users
             WHERE id = %s
             """,
@@ -232,6 +250,52 @@ def update_profile(
         "message": message,
         "user": user_to_public_dict(updated_user),
     }
+
+
+@app.get("/account/me")
+def account_me(current_user: dict = Depends(get_current_user)):
+    """Backward-compatible alias for older desktop account clients."""
+    return me(current_user)
+
+
+@app.patch("/account/profile")
+def account_update_profile(
+    payload: ProfileUpdateRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """Backward-compatible alias for profile updates."""
+    return update_profile(payload, current_user)
+
+
+@app.get("/account/subscription")
+def account_subscription(current_user: dict = Depends(get_current_user)):
+    """Backward-compatible alias for the signed-in subscription dashboard."""
+    return {
+        "ok": True,
+        "subscription": dashboard_for_user(current_user),
+    }
+
+
+@app.get("/account/payments")
+def account_payment_history(current_user: dict = Depends(get_current_user)):
+    """Backward-compatible alias for the signed-in payment history."""
+    return my_payment_history(current_user)
+
+
+@app.post("/account/payments")
+def account_create_payment_request(
+    payload: PaymentRequestCreate,
+    request: Request,
+    current_user: dict = Depends(get_current_user),
+):
+    """Backward-compatible alias for creating a payment request."""
+    return create_payment_request(payload, request, current_user)
+
+
+@app.post("/account/logout")
+def account_logout(current_user: dict = Depends(get_current_user)):
+    """Backward-compatible alias for account logout."""
+    return auth_logout(current_user)
 
 
 @app.post("/me/change-password")

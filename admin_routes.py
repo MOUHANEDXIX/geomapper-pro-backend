@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from database import get_db
-from models import ApiResponse, StatusUpdateRequest
+from models import AdminSubscriptionRenewRequest, ApiResponse, StatusUpdateRequest
 from security import decode_access_token
-from access_policy import active_plan_code, can_access_module, days_remaining
+from access_policy import active_plan_code, can_access_module, days_remaining, subscription_diagnostic
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
 
@@ -52,8 +54,25 @@ def get_current_user(
                    u.subscription_expires_at, u.last_payment_id,
                    u.email_verified, u.avatar_path, u.created_at,
                    s.id AS session_id,
-                   s.revoked_at AS session_revoked_at,
-                   s.revoked_reason AS session_revoked_reason
+                    s.revoked_at AS session_revoked_at,
+                    s.revoked_reason AS session_revoked_reason,
+                    EXISTS (
+                        SELECT 1 FROM payments p
+                        WHERE p.user_id = u.id
+                          AND p.status = 'pending'
+                    ) AS pending_payment,
+                    (
+                        SELECT p.id FROM payments p
+                        WHERE p.user_id = u.id
+                        ORDER BY p.created_at DESC, p.id DESC
+                        LIMIT 1
+                    ) AS latest_payment_id,
+                    (
+                        SELECT p.status FROM payments p
+                        WHERE p.user_id = u.id
+                        ORDER BY p.created_at DESC, p.id DESC
+                        LIMIT 1
+                    ) AS last_payment_status
             FROM app_users u
             LEFT JOIN app_sessions s
               ON s.id = %s
@@ -104,7 +123,7 @@ def public_user(user: dict) -> dict:
         "username": user["username"],
         "email": user["email"],
         "role": user["role"],
-        "status": user["status"],
+        "status": str(user["status"] or "").strip().lower() or "awaiting_payment",
         "account_state": user.get("account_state") or "active",
         "payment_plan": user.get("payment_plan") or "free",
         "requested_plan": user.get("requested_plan"),
@@ -114,6 +133,10 @@ def public_user(user: dict) -> dict:
         "subscription_started_at": user["subscription_started_at"].isoformat() if user.get("subscription_started_at") else None,
         "subscription_expires_at": user["subscription_expires_at"].isoformat() if user.get("subscription_expires_at") else None,
         "last_payment_id": user.get("last_payment_id"),
+        "pending_payment": bool(user.get("pending_payment")),
+        "latest_payment_id": user.get("latest_payment_id"),
+        "last_payment_status": user.get("last_payment_status"),
+        "subscription_warning": subscription_diagnostic(user),
         "days_remaining": days_remaining(user),
         "modules": {
             "coordinates": can_access_module(user, "coordinates"),
@@ -137,7 +160,24 @@ def list_users(_: dict = Depends(require_admin)):
                    payment_plan, requested_plan, active_plan,
                    subscription_status, subscription_started_at,
                    subscription_expires_at, last_payment_id,
-                   email_verified, avatar_path, created_at
+                   email_verified, avatar_path, created_at,
+                   EXISTS (
+                       SELECT 1 FROM payments p
+                       WHERE p.user_id = app_users.id
+                         AND p.status = 'pending'
+                   ) AS pending_payment,
+                   (
+                       SELECT p.id FROM payments p
+                       WHERE p.user_id = app_users.id
+                       ORDER BY p.created_at DESC, p.id DESC
+                       LIMIT 1
+                   ) AS latest_payment_id,
+                   (
+                       SELECT p.status FROM payments p
+                       WHERE p.user_id = app_users.id
+                       ORDER BY p.created_at DESC, p.id DESC
+                       LIMIT 1
+                   ) AS last_payment_status
             FROM app_users
             ORDER BY id ASC
             """
@@ -156,7 +196,7 @@ def update_user_status(
     _: dict = Depends(require_admin),
 ):
     """Update a non-admin user's payment/access status."""
-    status = payload.status.strip()
+    status = payload.status.strip().lower()
     payment_plan = (payload.payment_plan or "").strip().lower()
 
     if status not in VALID_STATUSES:
@@ -200,6 +240,87 @@ def update_user_status(
     return ApiResponse(ok=True, message=f"Status updated: {status}")
 
 
+@router.post("/users/{user_id}/subscriptions/renew")
+def renew_user_subscription(
+    user_id: int,
+    payload: AdminSubscriptionRenewRequest,
+    admin_user: dict = Depends(require_admin),
+):
+    """Create and approve a payment so the database trigger renews access."""
+    plan_code = payload.plan_code.strip().lower()
+    note = (payload.notes or "Admin subscription renewal").strip()
+
+    with get_db() as conn:
+        user = conn.execute(
+            """
+            SELECT id, role
+            FROM app_users
+            WHERE id = %s
+            FOR UPDATE
+            """,
+            (user_id,),
+        ).fetchone()
+        if not user:
+            return {"ok": False, "message": "User not found."}
+        if user["role"] == "admin":
+            return {"ok": False, "message": "Administrator accounts already have full access."}
+
+        plan = conn.execute(
+            """
+            SELECT code, name, price_tnd
+            FROM plans
+            WHERE code = %s
+              AND active = TRUE
+            """,
+            (plan_code,),
+        ).fetchone()
+        if not plan:
+            return {"ok": False, "message": "Invalid plan code."}
+
+        bank_reference = _admin_bank_reference(plan_code, user_id)
+        payment = conn.execute(
+            """
+            INSERT INTO payments (
+                user_id,
+                plan_code,
+                amount,
+                currency,
+                payment_method,
+                bank_reference,
+                status,
+                notes
+            )
+            VALUES (%s, %s, %s, 'TND', 'admin_manual_renewal', %s, 'pending', %s)
+            RETURNING id
+            """,
+            (
+                user_id,
+                plan_code,
+                plan["price_tnd"],
+                bank_reference,
+                note,
+            ),
+        ).fetchone()
+
+        conn.execute(
+            """
+            UPDATE payments
+            SET status = 'approved',
+                approved_at = COALESCE(approved_at, NOW()),
+                approved_by = %s
+            WHERE id = %s
+            """,
+            (admin_user["id"], payment["id"]),
+        )
+
+    return {
+        "ok": True,
+        "message": "Paiement validé. L'abonnement a été activé automatiquement.",
+        "payment_id": payment["id"],
+        "plan_code": plan_code,
+    }
+
+
 @router.delete("/users/{user_id}", response_model=ApiResponse)
 def delete_user(
     user_id: int,
@@ -232,3 +353,8 @@ def delete_user(
         )
 
     return ApiResponse(ok=True, message="User deleted successfully.")
+
+
+def _admin_bank_reference(plan_code: str, user_id: int) -> str:
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+    return f"GMP-ADMIN-{plan_code.upper()}-{user_id}-{stamp}"

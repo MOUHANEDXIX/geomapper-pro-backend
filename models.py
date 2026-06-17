@@ -163,6 +163,21 @@ class PaymentNoteRequest(BaseModel):
     notes: str = Field(default="", max_length=1000)
 
 
+class AdminSubscriptionRenewRequest(BaseModel):
+    """Payload for creating/renewing a subscription from the admin panel."""
+
+    plan_code: str = Field(min_length=1, max_length=20)
+    notes: str | None = Field(default=None, max_length=1000)
+
+    @field_validator("plan_code")
+    @classmethod
+    def validate_plan_code(cls, value: str) -> str:
+        plan = value.strip().lower()
+        if plan not in {"plus", "pro"}:
+            raise ValueError("Choose Plus or Pro.")
+        return plan
+
+
 class SupportRequest(BaseModel):
     """Payload for the public support form."""
 

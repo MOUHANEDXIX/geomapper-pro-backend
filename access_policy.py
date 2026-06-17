@@ -113,11 +113,7 @@ def active_plan_code(user: dict) -> str:
     if active_plan == "free":
         return "free"
 
-    # Legacy compatibility for accounts created before subscription columns.
-    if user.get("status") != "paid":
-        return "free"
-    selected = str(user.get("payment_plan") or "").strip().lower()
-    return selected if selected in {"plus", "pro"} else "plus"
+    return "free"
 
 
 def is_subscription_active(user: dict) -> bool:
@@ -131,7 +127,7 @@ def is_subscription_active(user: dict) -> bool:
         return False
     if plan not in {"plus", "pro"}:
         return False
-    if str(user.get("subscription_status") or "").strip().lower() != "active":
+    if _normalized_text(user.get("subscription_status")) != "active":
         return False
     expires_at = _parse_datetime(user.get("subscription_expires_at"))
     return bool(expires_at and expires_at > datetime.now(timezone.utc))
@@ -179,10 +175,10 @@ def dashboard_for_user(user: dict) -> dict:
         "email": user["email"],
         "role": user["role"],
         "account_state": user.get("account_state") or "active",
-        "payment_status": user.get("status") or "awaiting_payment",
+        "payment_status": _normalized_text(user.get("status")) or "awaiting_payment",
         "active_plan": plan_code,
         "stored_active_plan": user.get("active_plan") or "free",
-        "subscription_status": user.get("subscription_status") or "inactive",
+        "subscription_status": _normalized_text(user.get("subscription_status")) or "inactive",
         "subscription_started_at": _iso_datetime(user.get("subscription_started_at")),
         "subscription_expires_at": _iso_datetime(user.get("subscription_expires_at")),
         "days_remaining": days_remaining(user),
@@ -195,6 +191,32 @@ def dashboard_for_user(user: dict) -> dict:
         "module_access": modules,
         "unlocked_modules": unlocked_modules(user),
     }
+
+
+def subscription_diagnostic(user: dict) -> str | None:
+    """Explain why a stored paid plan is not currently usable."""
+    if not user or user.get("role") == "admin":
+        return None
+    stored_plan = _normalized_text(user.get("active_plan") or user.get("stored_active_plan"))
+    if stored_plan not in {"plus", "pro"}:
+        stored_plan = _normalized_text(user.get("payment_plan"))
+    if stored_plan not in {"plus", "pro"}:
+        return None
+    if active_plan_code(user) in {"plus", "pro"}:
+        return None
+    status = _normalized_text(user.get("subscription_status"))
+    expires_at = _parse_datetime(user.get("subscription_expires_at"))
+    if status != "active":
+        return "subscription_status is not active"
+    if expires_at is None:
+        return "subscription_expires_at is missing or invalid"
+    if expires_at <= datetime.now(timezone.utc):
+        return "subscription_expires_at is expired"
+    return "paid subscription is incomplete"
+
+
+def _normalized_text(value) -> str:
+    return str(value or "").strip().lower()
 
 
 def _parse_datetime(value) -> datetime | None:

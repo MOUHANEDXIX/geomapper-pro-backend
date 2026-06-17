@@ -403,6 +403,19 @@ def init_db():
         conn.execute(
             """
             UPDATE app_users
+            SET status = BTRIM(status),
+                payment_plan = LOWER(BTRIM(payment_plan)),
+                active_plan = LOWER(BTRIM(active_plan)),
+                subscription_status = LOWER(BTRIM(subscription_status))
+            WHERE status <> BTRIM(status)
+               OR payment_plan <> LOWER(BTRIM(payment_plan))
+               OR active_plan <> LOWER(BTRIM(active_plan))
+               OR subscription_status <> LOWER(BTRIM(subscription_status))
+            """
+        )
+        conn.execute(
+            """
+            UPDATE app_users
             SET payment_plan = CASE
                 WHEN role = 'admin' THEN 'admin'
                 WHEN status IN ('paid', 'approved') AND payment_plan = 'free' THEN 'plus'
@@ -515,24 +528,24 @@ def init_db():
         )
 
         release_channel = os.getenv("APP_RELEASE_CHANNEL", "stable").strip().lower() or "stable"
-        release_version = os.getenv("APP_LATEST_VERSION", "1.2.5").strip() or "1.2.5"
-        release_min_supported = os.getenv("APP_MIN_SUPPORTED_VERSION", "1.2.4").strip() or "1.2.4"
+        release_version = os.getenv("APP_LATEST_VERSION", "1.2.8").strip() or "1.2.8"
+        release_min_supported = os.getenv("APP_MIN_SUPPORTED_VERSION", "1.2.5").strip() or "1.2.5"
         default_download_url = os.getenv(
             "GEOMAPPER_DOWNLOAD_URL",
-            "https://github.com/MOUHANEDXIX/geomapper-pro-downloads/releases/download/v1.2.5-beta/GeoMapperProSetup.exe",
+            "https://github.com/MOUHANEDXIX/geomapper-pro-downloads/releases/download/v1.2.8-beta/GeoMapperProSetup.exe",
         ).strip()
         release_download_url = os.getenv("APP_DOWNLOAD_URL", default_download_url).strip() or default_download_url
         release_notes = os.getenv(
             "APP_RELEASE_NOTES",
-            "GeoMapper Pro Beta 1.2.5: adds local Ollama AI setup, manual bank-transfer subscriptions, smoother in-app notifications, and hardened module access.",
+            "GeoMapper Pro Beta 1.2.8: fixes AI assistant crashes, adds account route aliases, gates diagnostics, improves update progress, corrects h/Z handling, and fixes dashboard cropping.",
         )
         release_sha256 = os.getenv(
             "APP_RELEASE_SHA256",
-            "D50C941B04EC5C7386092ED9EB00B41040815369F050E9AE77948E2F4AC2EF32",
+            "B04F66BCC1A310376CB0CD20107E28894D92428FDB8132FB37122AEC9A40976A",
         ).strip() or None
         release_signature = os.getenv(
             "APP_RELEASE_SIGNATURE",
-            "aDsxgtMZdRBL+isNh+wS+uJklpOYnFY/eDgiENjjpj/9qmWqdOux+N8TSEwYeP3HlqKXNiTGxgR/jXzaH3wJBg==",
+            "jvqLD44tu+4LFd8XwcMzHaLrVHlPPLk9V2emxqZ3H5baTIGrJiZ2XUGuurv3tH09u845+/wrFS4afVSmAiIwAw==",
         ).strip() or None
         release_signature_algorithm = (
             os.getenv("APP_RELEASE_SIGNATURE_ALGORITHM", "ed25519-sha256").strip().lower() or None
@@ -541,7 +554,7 @@ def init_db():
         )
         release_label = os.getenv("APP_RELEASE_LABEL", f"GeoMapper Pro Beta v{release_version}").strip() or None
         release_installer_filename = os.getenv("APP_INSTALLER_FILENAME", "GeoMapperProSetup.exe").strip() or "GeoMapperProSetup.exe"
-        installer_size_raw = os.getenv("APP_INSTALLER_SIZE_BYTES", "203643130").strip()
+        installer_size_raw = os.getenv("APP_INSTALLER_SIZE_BYTES", "204318895").strip()
         release_installer_size = int(installer_size_raw) if installer_size_raw.isdigit() else None
         release_required = os.getenv("APP_UPDATE_REQUIRED", "false").strip().lower() in {"1", "true", "yes"}
 
