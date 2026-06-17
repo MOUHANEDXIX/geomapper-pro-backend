@@ -31,7 +31,7 @@ class EmailService:
         self.support_email = os.getenv("SUPPORT_EMAIL", "progeomapper@gmail.com").strip()
         self.password_reset_url = os.getenv(
             "PASSWORD_RESET_URL",
-            f"{os.getenv('FRONTEND_URL', 'https://geomapper-pro.pages.dev').rstrip('/')}/#account",
+            f"{os.getenv('FRONTEND_URL', 'https://geomapperpro.pages.dev').rstrip('/')}/#account",
         ).strip()
 
     def send_verification_code(self, to_email: str, username: str, code: str) -> None:
