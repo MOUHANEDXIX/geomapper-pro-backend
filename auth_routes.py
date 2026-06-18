@@ -6,7 +6,7 @@ import logging
 import secrets
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 
 from access_policy import active_plan_code, can_access_module, days_remaining, subscription_diagnostic
 from admin_routes import get_current_user
@@ -45,6 +45,15 @@ def generate_code() -> tuple[str, datetime]:
     code = str(secrets.randbelow(900_000) + 100_000)
     expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
     return code, expires_at
+
+
+def send_password_reset_email_background(email: str, username: str, code: str) -> None:
+    """Send reset mail outside the request/response path."""
+
+    try:
+        EmailService().send_password_reset_code(email, username, code)
+    except Exception:
+        logger.exception("Password-reset email delivery failed")
 
 
 def user_to_public_dict(user: dict) -> dict:
@@ -407,7 +416,7 @@ def resend_code(payload: ResendCodeRequest, request: Request):
 
 
 @router.post("/forgot-password", response_model=ApiResponse)
-def forgot_password(payload: ForgotPasswordRequest, request: Request):
+def forgot_password(payload: ForgotPasswordRequest, request: Request, background_tasks: BackgroundTasks):
     """Send a reset code without revealing whether the account exists."""
     email = str(payload.email).strip().lower()
     enforce_rate_limit(request, "forgot_password", email)
@@ -435,10 +444,7 @@ def forgot_password(payload: ForgotPasswordRequest, request: Request):
             )
 
     if user:
-        try:
-            EmailService().send_password_reset_code(email, user["username"], code)
-        except Exception:
-            logger.exception("Password-reset email delivery failed")
+        background_tasks.add_task(send_password_reset_email_background, email, user["username"], code)
 
     return ApiResponse(ok=True, message=RESET_MESSAGE)
 
