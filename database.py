@@ -528,24 +528,24 @@ def init_db():
         )
 
         release_channel = os.getenv("APP_RELEASE_CHANNEL", "stable").strip().lower() or "stable"
-        release_version = os.getenv("APP_LATEST_VERSION", "1.3.5").strip() or "1.3.5"
+        release_version = os.getenv("APP_LATEST_VERSION", "1.3.6").strip() or "1.3.6"
         release_min_supported = os.getenv("APP_MIN_SUPPORTED_VERSION", "1.2.5").strip() or "1.2.5"
         default_download_url = os.getenv(
             "GEOMAPPER_DOWNLOAD_URL",
-            "https://github.com/MOUHANEDXIX/geomapper-pro-downloads/releases/download/v1.3.5-beta/GeoMapperProSetup.exe",
+            "https://github.com/MOUHANEDXIX/geomapper-pro-downloads/releases/download/v1.3.6-beta/GeoMapperProSetup.exe",
         ).strip()
         release_download_url = os.getenv("APP_DOWNLOAD_URL", default_download_url).strip() or default_download_url
         release_notes = os.getenv(
             "APP_RELEASE_NOTES",
-            "GeoMapper Pro Beta 1.3.5: prevents hidden updater helper processes from lingering after Windows installer handoff, keeps detached relaunch, and preserves detailed restart diagnostics.",
+            "GeoMapper Pro Beta 1.3.6: premium geomatics UI redesign with upgraded shell, dashboard, login, CRS/raster/vector/AI workspaces, and preserved workflow behavior.",
         )
         release_sha256 = os.getenv(
             "APP_RELEASE_SHA256",
-            "E1C98061B006359CB93D71D9F2B2AE9A73BF91A70AF64D04470428EECCAB48A9",
+            "5EA990F425338F92D841C8907F7A084153D2574301B7E2C573DFA12994121AF3",
         ).strip() or None
         release_signature = os.getenv(
             "APP_RELEASE_SIGNATURE",
-            "VC6Q6ndlRQmocMY79f9hp/kAjYpowpZdjBlCSqUfoLZRIzOGZPAzKLJqUevQAi2N9BEEffJPq0qvP3jdlrkwDw==",
+            "DiGMBvvrDypzo8XRuaex/u9Dfi/+soNuvbbn1QKqDvOV2g1A3Oh6Qix2V45/zhmeW483COyOxEywfA0Y78CnCg==",
         ).strip() or None
         release_signature_algorithm = (
             os.getenv("APP_RELEASE_SIGNATURE_ALGORITHM", "ed25519-sha256").strip().lower() or None
@@ -554,7 +554,7 @@ def init_db():
         )
         release_label = os.getenv("APP_RELEASE_LABEL", f"GeoMapper Pro Beta v{release_version}").strip() or None
         release_installer_filename = os.getenv("APP_INSTALLER_FILENAME", "GeoMapperProSetup.exe").strip() or "GeoMapperProSetup.exe"
-        installer_size_raw = os.getenv("APP_INSTALLER_SIZE_BYTES", "204340825").strip()
+        installer_size_raw = os.getenv("APP_INSTALLER_SIZE_BYTES", "204348867").strip()
         release_installer_size = int(installer_size_raw) if installer_size_raw.isdigit() else None
         release_required = os.getenv("APP_UPDATE_REQUIRED", "false").strip().lower() in {"1", "true", "yes"}
 
