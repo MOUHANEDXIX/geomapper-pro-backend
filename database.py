@@ -541,11 +541,11 @@ def init_db():
         )
         release_sha256 = os.getenv(
             "APP_RELEASE_SHA256",
-            "CF9C0EB2D08CE03D6BD8CC05620F89F2F44CB51DCDFABF77C75C4DB68606E873",
+            "E1C98061B006359CB93D71D9F2B2AE9A73BF91A70AF64D04470428EECCAB48A9",
         ).strip() or None
         release_signature = os.getenv(
             "APP_RELEASE_SIGNATURE",
-            "euWBH3MWk4EnAGPdzOsFJoGinC0K5bL8XMr0+1vE3OImviTvnZqqg8FAgUKIdMbLD3sk/ACoWOnqyKYLoS/LBQ==",
+            "VC6Q6ndlRQmocMY79f9hp/kAjYpowpZdjBlCSqUfoLZRIzOGZPAzKLJqUevQAi2N9BEEffJPq0qvP3jdlrkwDw==",
         ).strip() or None
         release_signature_algorithm = (
             os.getenv("APP_RELEASE_SIGNATURE_ALGORITHM", "ed25519-sha256").strip().lower() or None
@@ -554,7 +554,7 @@ def init_db():
         )
         release_label = os.getenv("APP_RELEASE_LABEL", f"GeoMapper Pro Beta v{release_version}").strip() or None
         release_installer_filename = os.getenv("APP_INSTALLER_FILENAME", "GeoMapperProSetup.exe").strip() or "GeoMapperProSetup.exe"
-        installer_size_raw = os.getenv("APP_INSTALLER_SIZE_BYTES", "204335334").strip()
+        installer_size_raw = os.getenv("APP_INSTALLER_SIZE_BYTES", "204340825").strip()
         release_installer_size = int(installer_size_raw) if installer_size_raw.isdigit() else None
         release_required = os.getenv("APP_UPDATE_REQUIRED", "false").strip().lower() in {"1", "true", "yes"}
 
