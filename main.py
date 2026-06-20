@@ -29,7 +29,7 @@ from payment_routes import create_payment_request, my_payment_history, router as
 
 app = FastAPI(
     title="GeoMapper Pro Backend",
-    version="1.3.6",
+    version="1.3.7",
 )
 
 logger = logging.getLogger(__name__)
