@@ -13,7 +13,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv(Path(__file__).resolve().with_name(".env"), override=True)
+load_dotenv(Path(__file__).resolve().with_name(".env"), override=True, encoding="utf-8-sig")
 
 
 class EmailService:
@@ -21,14 +21,14 @@ class EmailService:
 
     def __init__(self):
         """Load SMTP connection settings from environment variables."""
-        self.smtp_host = os.getenv("APP_SMTP_HOST")
-        self.smtp_port = int(os.getenv("APP_SMTP_PORT", "465"))
-        self.smtp_email = os.getenv("APP_SMTP_EMAIL")
-        self.smtp_password = os.getenv("APP_SMTP_PASSWORD", "").replace(" ", "")
-        self.from_name = os.getenv("APP_SMTP_FROM_NAME", "GeoMapper Pro")
-        self.from_email = os.getenv("APP_EMAIL_FROM_EMAIL") or self.smtp_email
-        self.brevo_api_key = os.getenv("BREVO_API_KEY", "").strip()
-        self.support_email = os.getenv("SUPPORT_EMAIL", "progeomapper@gmail.com").strip()
+        self.smtp_host = _first_env("APP_SMTP_HOST", "SMTP_HOST")
+        self.smtp_port = _env_int("APP_SMTP_PORT", "SMTP_PORT", default=465)
+        self.smtp_email = _first_env("APP_SMTP_EMAIL", "SMTP_USER")
+        self.smtp_password = (_first_env("APP_SMTP_PASSWORD", "SMTP_PASS") or "").replace(" ", "")
+        self.from_name = _first_env("APP_SMTP_FROM_NAME", "SMTP_FROM_NAME") or "GeoMapper Pro"
+        self.from_email = _first_env("APP_EMAIL_FROM_EMAIL", "APP_SMTP_FROM_EMAIL", "APP_SMTP_EMAIL", "SMTP_USER")
+        self.brevo_api_key = _first_env("BREVO_API_KEY", "APP_BREVO_API_KEY", "SENDINBLUE_API_KEY") or ""
+        self.support_email = (_first_env("SUPPORT_EMAIL") or "progeomapper@gmail.com").strip()
         self.password_reset_url = os.getenv(
             "PASSWORD_RESET_URL",
             f"{os.getenv('FRONTEND_URL', 'https://geomapperpro.pages.dev').rstrip('/')}/#account",
@@ -145,7 +145,7 @@ class EmailService:
 
         # Build a plain-text message so every email client can display it.
         msg = EmailMessage()
-        msg["From"] = formataddr((self.from_name, self.smtp_email))
+        msg["From"] = formataddr((self.from_name, self.from_email or self.smtp_email))
         msg["To"] = to_email
         msg["Subject"] = subject
 
@@ -163,3 +163,26 @@ class EmailService:
             server.starttls()
             server.login(self.smtp_email, self.smtp_password)
             server.send_message(msg)
+
+
+def _first_env(*names: str) -> str | None:
+    """Return the first non-empty environment value from a list of names."""
+
+    for name in names:
+        value = os.getenv(name)
+        if value and value.strip():
+            return value.strip()
+    return None
+
+
+def _env_int(*names: str, default: int) -> int:
+    """Read an integer environment value with a safe fallback."""
+
+    value = _first_env(*names)
+    if not value:
+        return default
+
+    try:
+        return int(value)
+    except ValueError:
+        return default

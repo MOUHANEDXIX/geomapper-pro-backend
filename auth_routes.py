@@ -38,6 +38,16 @@ ONE_MACHINE_NOTICE = (
     " For privacy, this account can be used on one machine at a time. "
     "The previous open session was closed."
 )
+VERIFICATION_EMAIL_UNAVAILABLE_MESSAGE = (
+    "The verification email could not be sent right now. "
+    "Please try again later or contact support."
+)
+
+
+class VerificationEmailDeliveryError(RuntimeError):
+    """Raised to roll back code changes when verification email delivery fails."""
+
+    pass
 
 
 def generate_code() -> tuple[str, datetime]:
@@ -54,6 +64,16 @@ def send_password_reset_email_background(email: str, username: str, code: str) -
         EmailService().send_password_reset_code(email, username, code)
     except Exception:
         logger.exception("Password-reset email delivery failed")
+
+
+def send_verification_email_or_raise(email: str, username: str, code: str, context: str) -> None:
+    """Send a verification email, raising a route-level error on failure."""
+
+    try:
+        EmailService().send_verification_code(email, username, code)
+    except Exception as exc:
+        logger.exception("%s verification email delivery failed", context)
+        raise VerificationEmailDeliveryError(VERIFICATION_EMAIL_UNAVAILABLE_MESSAGE) from exc
 
 
 def user_to_public_dict(user: dict) -> dict:
@@ -209,21 +229,18 @@ def register_user(payload: RegisterRequest, request: Request):
                 """,
                 (username, email, hash_password(password), STATUS_AWAITING, code, expires_at),
             )
+            send_verification_email_or_raise(email, username, code, "Registration")
+    except VerificationEmailDeliveryError:
+        return ApiResponse(
+            ok=False,
+            message=(
+                "Account was not created because the verification email could not be sent. "
+                "Please try again later or contact support."
+            ),
+        )
     except Exception:
         logger.exception("Account registration failed")
         raise HTTPException(status_code=500, detail="Account creation is temporarily unavailable. Please try again later.")
-
-    try:
-        EmailService().send_verification_code(email, username, code)
-    except Exception:
-        logger.exception("Verification email delivery failed for new account")
-        return ApiResponse(
-            ok=True,
-            message=(
-                "Account created, but the verification email could not be sent. "
-                "Please use 'Resend code' shortly or contact support."
-            ),
-        )
 
     return ApiResponse(
         ok=True,
@@ -286,11 +303,12 @@ def login(payload: LoginRequest, request: Request):
     public_user = user_to_public_dict(user)
 
     status = str(user.get("status") or "").strip().lower()
+    plan_code = active_plan_code(user)
     if user["role"] == "admin":
         message = "Administrator sign-in successful."
-    elif can_access_module(user, "vector"):
+    elif plan_code == "pro":
         message = "Sign-in successful. Pro access is active."
-    elif can_access_module(user, "raster"):
+    elif plan_code == "plus":
         message = "Sign-in successful. Plus access is active."
     elif user.get("subscription_status") == "expired":
         message = "Sign-in successful. Your subscription has expired."
@@ -380,37 +398,41 @@ def resend_code(payload: ResendCodeRequest, request: Request):
     enforce_rate_limit(request, "resend_code", email)
     code, expires_at = generate_code()
 
-    with get_db() as conn:
-        user = conn.execute(
-            """
-            SELECT id, username, email_verified
-            FROM app_users
-            WHERE LOWER(email) = LOWER(%s)
-              AND account_state = 'active'
-            """,
-            (email,),
-        ).fetchone()
-
-        if not user:
-            return ApiResponse(ok=False, message="No account was found for this email address.")
-        if bool(user["email_verified"]):
-            return ApiResponse(ok=False, message="This email address is already verified.")
-
-        conn.execute(
-            """
-            UPDATE app_users
-            SET email_verification_code = %s,
-                email_verification_expires_at = %s
-            WHERE id = %s
-            """,
-            (code, expires_at, user["id"]),
-        )
-
     try:
-        EmailService().send_verification_code(email, user["username"], code)
-    except Exception:
-        logger.exception("Verification resend email delivery failed")
-        return ApiResponse(ok=False, message="Unable to send the verification email right now. Please try again later.")
+        with get_db() as conn:
+            user = conn.execute(
+                """
+                SELECT id, username, email_verified
+                FROM app_users
+                WHERE LOWER(email) = LOWER(%s)
+                  AND account_state = 'active'
+                """,
+                (email,),
+            ).fetchone()
+
+            if not user:
+                return ApiResponse(ok=False, message="No account was found for this email address.")
+            if bool(user["email_verified"]):
+                return ApiResponse(ok=False, message="This email address is already verified.")
+
+            conn.execute(
+                """
+                UPDATE app_users
+                SET email_verification_code = %s,
+                    email_verification_expires_at = %s
+                WHERE id = %s
+                """,
+                (code, expires_at, user["id"]),
+            )
+            send_verification_email_or_raise(email, user["username"], code, "Resend")
+    except VerificationEmailDeliveryError:
+        return ApiResponse(
+            ok=False,
+            message=(
+                "The verification email could not be sent. "
+                "Your existing code is still valid if it has not expired. Please try again later."
+            ),
+        )
 
     return ApiResponse(ok=True, message="A new verification code was sent to your email.")
 

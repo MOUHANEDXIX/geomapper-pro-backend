@@ -15,11 +15,17 @@ import logging
 from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
-from auth_routes import generate_code, logout as auth_logout, router as auth_router, user_to_public_dict
+from auth_routes import (
+    VerificationEmailDeliveryError,
+    generate_code,
+    logout as auth_logout,
+    router as auth_router,
+    send_verification_email_or_raise,
+    user_to_public_dict,
+)
 from admin_routes import get_current_user, router as admin_router
 from access_policy import dashboard_for_user
 from database import cleanup_expired_unverified_users, get_db, init_default_admin
-from email_service import EmailService
 from models import ChangePasswordRequest, DeactivateAccountRequest, PaymentRequestCreate, ProfileUpdateRequest
 from rate_limit import enforce_rate_limit
 from security import hash_password, verify_password
@@ -148,102 +154,108 @@ def update_profile(
     if must_verify_email:
         code, expires_at = generate_code()
 
-    with get_db() as conn:
-        # Keep username and email unique across every account except the one
-        # currently being updated.
-        existing = conn.execute(
-            """
-            SELECT id
-            FROM app_users
-            WHERE id <> %s
-              AND (LOWER(username) = LOWER(%s) OR LOWER(email) = LOWER(%s))
-            """,
-            (user_id, username, email),
-        ).fetchone()
+    try:
+        with get_db() as conn:
+            # Keep username and email unique across every account except the one
+            # currently being updated.
+            existing = conn.execute(
+                """
+                SELECT id
+                FROM app_users
+                WHERE id <> %s
+                  AND (LOWER(username) = LOWER(%s) OR LOWER(email) = LOWER(%s))
+                """,
+                (user_id, username, email),
+            ).fetchone()
 
-        if existing:
-            return {
-                "ok": False,
-                "message": "Username or email is already in use.",
-            }
+            if existing:
+                return {
+                    "ok": False,
+                    "message": "Username or email is already in use.",
+                }
 
-        # Reset email verification only when a normal user changed email.
-        conn.execute(
-            """
-            UPDATE app_users
-            SET username = %s,
-                email = %s,
-                avatar_path = %s,
-                email_verified = CASE
-                    WHEN %s THEN FALSE
-                    ELSE email_verified
-                END,
-                email_verification_code = CASE
-                    WHEN %s THEN %s
-                    ELSE email_verification_code
-                END,
-                email_verification_expires_at = CASE
-                    WHEN %s THEN %s
-                    ELSE email_verification_expires_at
-                END
-            WHERE id = %s
-            """,
-            (
-                username,
-                email,
-                avatar_path,
-                must_verify_email,
-                must_verify_email,
-                code,
-                must_verify_email,
-                expires_at,
-                user_id,
+            # Reset email verification only when a normal user changed email.
+            conn.execute(
+                """
+                UPDATE app_users
+                SET username = %s,
+                    email = %s,
+                    avatar_path = %s,
+                    email_verified = CASE
+                        WHEN %s THEN FALSE
+                        ELSE email_verified
+                    END,
+                    email_verification_code = CASE
+                        WHEN %s THEN %s
+                        ELSE email_verification_code
+                    END,
+                    email_verification_expires_at = CASE
+                        WHEN %s THEN %s
+                        ELSE email_verification_expires_at
+                    END
+                WHERE id = %s
+                """,
+                (
+                    username,
+                    email,
+                    avatar_path,
+                    must_verify_email,
+                    must_verify_email,
+                    code,
+                    must_verify_email,
+                    expires_at,
+                    user_id,
+                ),
+            )
+
+            # Re-read the user so the desktop/web clients receive the authoritative
+            # state after database triggers/defaults and verification changes.
+            updated_user = conn.execute(
+                """
+                SELECT id, username, email, role, status, account_state,
+                       payment_plan, requested_plan, active_plan,
+                       subscription_status, subscription_started_at,
+                       subscription_expires_at, last_payment_id,
+                       email_verified, avatar_path, created_at,
+                       EXISTS (
+                           SELECT 1 FROM payments p
+                           WHERE p.user_id = app_users.id
+                             AND p.status = 'pending'
+                       ) AS pending_payment,
+                       (
+                           SELECT p.id FROM payments p
+                           WHERE p.user_id = app_users.id
+                           ORDER BY p.created_at DESC, p.id DESC
+                           LIMIT 1
+                       ) AS latest_payment_id,
+                       (
+                           SELECT p.status FROM payments p
+                           WHERE p.user_id = app_users.id
+                           ORDER BY p.created_at DESC, p.id DESC
+                           LIMIT 1
+                       ) AS last_payment_status
+                FROM app_users
+                WHERE id = %s
+                """,
+                (user_id,),
+            ).fetchone()
+
+            if must_verify_email and code:
+                send_verification_email_or_raise(email, username, code, "Profile email-change")
+    except VerificationEmailDeliveryError:
+        return {
+            "ok": False,
+            "message": (
+                "Profile was not changed because the verification email could not be sent. "
+                "Please try again later or contact support."
             ),
-        )
+        }
 
-        # Re-read the user so the desktop/web clients receive the authoritative
-        # state after database triggers/defaults and verification changes.
-        updated_user = conn.execute(
-            """
-            SELECT id, username, email, role, status, account_state,
-                   payment_plan, requested_plan, active_plan,
-                   subscription_status, subscription_started_at,
-                   subscription_expires_at, last_payment_id,
-                   email_verified, avatar_path, created_at,
-                   EXISTS (
-                       SELECT 1 FROM payments p
-                       WHERE p.user_id = app_users.id
-                         AND p.status = 'pending'
-                   ) AS pending_payment,
-                   (
-                       SELECT p.id FROM payments p
-                       WHERE p.user_id = app_users.id
-                       ORDER BY p.created_at DESC, p.id DESC
-                       LIMIT 1
-                   ) AS latest_payment_id,
-                   (
-                       SELECT p.status FROM payments p
-                       WHERE p.user_id = app_users.id
-                       ORDER BY p.created_at DESC, p.id DESC
-                       LIMIT 1
-                   ) AS last_payment_status
-            FROM app_users
-            WHERE id = %s
-            """,
-            (user_id,),
-        ).fetchone()
-
-    # Sending email is outside the database transaction: the profile update is
-    # kept even if SMTP fails, and the user receives a clear message.
-    if must_verify_email and code:
-        try:
-            EmailService().send_verification_code(email, username, code)
-            message = "Profile updated. A verification code was sent to the new email address."
-        except Exception:
-            logger.exception("Profile email-change verification delivery failed")
-            message = "Profile updated, but the verification email could not be sent. Please use 'Resend code' shortly."
-    else:
-        message = "Profile updated successfully."
+    message = (
+        "Profile updated. A verification code was sent to the new email address."
+        if must_verify_email and code
+        else "Profile updated successfully."
+    )
 
     return {
         "ok": True,
