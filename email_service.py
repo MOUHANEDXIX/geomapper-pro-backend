@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import smtplib
 import urllib.error
@@ -14,6 +15,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).resolve().with_name(".env"), override=True, encoding="utf-8-sig")
+logger = logging.getLogger(__name__)
 
 
 class EmailService:
@@ -83,9 +85,19 @@ class EmailService:
     def _send_text(self, to_email: str, recipient_name: str, subject: str, text: str) -> None:
         """Send one plain-text transactional email through the configured provider."""
         if self.brevo_api_key:
-            self._send_with_brevo(to_email, recipient_name, subject, text)
-            return
+            try:
+                self._send_with_brevo(to_email, recipient_name, subject, text)
+                return
+            except Exception:
+                if not self._has_smtp_config():
+                    raise
+                logger.exception("Brevo delivery failed; falling back to SMTP.")
         self._send_with_smtp(to_email, subject, text)
+
+    def _has_smtp_config(self) -> bool:
+        """Return True when enough SMTP settings exist for fallback delivery."""
+
+        return bool(self.smtp_host and self.smtp_email and self.smtp_password)
 
     def _send_with_brevo(
         self,
