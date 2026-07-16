@@ -30,6 +30,7 @@ class EmailService:
         self.from_name = _first_env("APP_SMTP_FROM_NAME", "SMTP_FROM_NAME") or "GeoMapper Pro"
         self.from_email = _first_env("APP_EMAIL_FROM_EMAIL", "APP_SMTP_FROM_EMAIL", "APP_SMTP_EMAIL", "SMTP_USER")
         self.brevo_api_key = _first_env("BREVO_API_KEY", "APP_BREVO_API_KEY", "SENDINBLUE_API_KEY") or ""
+        self.email_provider = _email_provider(_first_env("APP_EMAIL_PROVIDER", "EMAIL_PROVIDER"))
         self.support_email = (_first_env("SUPPORT_EMAIL") or "progeomapper@gmail.com").strip()
         self.password_reset_url = os.getenv(
             "PASSWORD_RESET_URL",
@@ -84,6 +85,14 @@ class EmailService:
 
     def _send_text(self, to_email: str, recipient_name: str, subject: str, text: str) -> None:
         """Send one plain-text transactional email through the configured provider."""
+        if self.email_provider == "smtp":
+            self._send_with_smtp(to_email, subject, text)
+            return
+
+        if self.email_provider == "brevo":
+            self._send_with_brevo(to_email, recipient_name, subject, text)
+            return
+
         if self.brevo_api_key:
             try:
                 self._send_with_brevo(to_email, recipient_name, subject, text)
@@ -198,3 +207,12 @@ def _env_int(*names: str, default: int) -> int:
         return int(value)
     except ValueError:
         return default
+
+
+def _email_provider(value: str | None) -> str:
+    """Normalize the requested outbound email provider."""
+
+    provider = (value or "auto").strip().lower()
+    if provider in {"auto", "brevo", "smtp"}:
+        return provider
+    return "auto"
