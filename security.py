@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import logging
 import os
 import secrets
 from datetime import datetime, timedelta, timezone
@@ -13,13 +14,31 @@ from typing import Optional
 from dotenv import load_dotenv
 from jose import JWTError, jwt
 
-load_dotenv(Path(__file__).resolve().with_name(".env"), override=True)
+load_dotenv(Path(__file__).resolve().with_name(".env"), override=True, encoding="utf-8-sig")
+
+logger = logging.getLogger(__name__)
 
 JWT_SECRET = os.getenv("JWT_SECRET", "change_me")
 JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "1440"))
 
 PBKDF2_ITERATIONS = 260_000
+
+
+def _is_production_environment() -> bool:
+    """Return True when the backend is running in a hosted/production context."""
+    env_names = ("APP_ENV", "ENV", "ENVIRONMENT", "PYTHON_ENV")
+    if any(os.getenv(name, "").strip().lower() in {"prod", "production"} for name in env_names):
+        return True
+    return os.getenv("RENDER", "").strip().lower() in {"1", "true", "yes"}
+
+
+if _is_production_environment() and JWT_SECRET == "change_me":
+    raise RuntimeError(
+        "JWT_SECRET is not configured. Set the JWT_SECRET environment variable "
+        "before starting the backend in production; a missing secret would "
+        "silently invalidate every user session on each restart."
+    )
 
 
 def hash_password(password: str) -> str:
@@ -77,6 +96,11 @@ def verify_password(password: str, password_hash: str) -> bool:
         return hmac.compare_digest(old_digest, password_hash)
 
     return False
+
+
+def password_needs_rehash(password_hash: str) -> bool:
+    """Return True for hashes older than the current PBKDF2 format."""
+    return not (password_hash or "").startswith("pbkdf2_sha256$")
 
 
 def create_access_token(data: dict, expires_minutes: Optional[int] = None) -> str:

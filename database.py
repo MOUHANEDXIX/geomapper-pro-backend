@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import logging
 from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import quote, unquote
@@ -12,7 +13,7 @@ import psycopg
 from dotenv import load_dotenv
 from psycopg.rows import dict_row
 
-load_dotenv(Path(__file__).resolve().with_name(".env"), override=True)
+load_dotenv(Path(__file__).resolve().with_name(".env"), override=True, encoding="utf-8-sig")
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
@@ -73,6 +74,15 @@ def normalize_database_url(database_url: str) -> str:
 
 
 DATABASE_URL = normalize_database_url(DATABASE_URL)
+logger = logging.getLogger(__name__)
+
+
+def _is_production_environment() -> bool:
+    """Return True when the backend is running in a hosted/production context."""
+    env_names = ("APP_ENV", "ENV", "ENVIRONMENT", "PYTHON_ENV")
+    if any(os.getenv(name, "").strip().lower() in {"prod", "production"} for name in env_names):
+        return True
+    return os.getenv("RENDER", "").strip().lower() in {"1", "true", "yes"}
 
 
 @contextmanager
@@ -151,9 +161,9 @@ def init_db():
             """
             INSERT INTO plans (code, name, price_tnd, duration_days, modules, active)
             VALUES
-                ('free', 'Free', 0, 0, '{"coordinates": true, "raster": false, "vector": false, "ai": false}'::jsonb, TRUE),
-                ('plus', 'Plus', 100, 30, '{"coordinates": true, "raster": true, "vector": false, "ai": false}'::jsonb, TRUE),
-                ('pro', 'Pro', 200, 30, '{"coordinates": true, "raster": true, "vector": true, "ai": true}'::jsonb, TRUE)
+                ('free', 'Free', 0, 0, '{"coordinates": true, "raster": false, "raster_georeferencing": false, "vector": false, "ai": false}'::jsonb, TRUE),
+                ('plus', 'Plus', 100, 30, '{"coordinates": true, "raster": true, "raster_georeferencing": true, "vector": true, "ai": false}'::jsonb, TRUE),
+                ('pro', 'Pro', 200, 30, '{"coordinates": true, "raster": true, "raster_georeferencing": true, "vector": true, "ai": true}'::jsonb, TRUE)
             ON CONFLICT (code) DO UPDATE
             SET name = EXCLUDED.name,
                 price_tnd = EXCLUDED.price_tnd,
@@ -528,33 +538,40 @@ def init_db():
         )
 
         release_channel = os.getenv("APP_RELEASE_CHANNEL", "stable").strip().lower() or "stable"
-        release_version = os.getenv("APP_LATEST_VERSION", "1.3.8").strip() or "1.3.8"
-        release_min_supported = os.getenv("APP_MIN_SUPPORTED_VERSION", "1.2.5").strip() or "1.2.5"
+        release_version = os.getenv("APP_LATEST_VERSION", "1.0.3").strip() or "1.0.3"
+        release_display_version = os.getenv(
+            "APP_DISPLAY_VERSION",
+            "1.0" if release_channel == "stable" else release_version,
+        ).strip() or release_version
+        release_min_supported = os.getenv("APP_MIN_SUPPORTED_VERSION", "1.0").strip() or "1.0"
         default_download_url = os.getenv(
             "GEOMAPPER_DOWNLOAD_URL",
-            "https://github.com/MOUHANEDXIX/geomapper-pro-downloads/releases/download/v1.3.8-beta/GeoMapperProSetup.exe",
+            "https://github.com/MOUHANEDXIX/geomapper-pro-downloads/releases/download/v1.0.3/GeoMapperProSetup.exe",
         ).strip()
         release_download_url = os.getenv("APP_DOWNLOAD_URL", default_download_url).strip() or default_download_url
         release_notes = os.getenv(
             "APP_RELEASE_NOTES",
-            "GeoMapper Pro Beta 1.3.8: removes stray UI fragments, keeps AI quick actions inside Assistant IA, and prevents duplicate silent-installer relaunches while preserving existing workflows.",
+            "GeoMapper Pro 1.0: stable core GIS build with fixed account creation/email verification reachability, bundled GDAL/PROJ data, bundled rasterio and pyogrio compiled extensions, coordinate, raster, vector, account, and updater workflows.",
         )
-        release_sha256 = os.getenv(
-            "APP_RELEASE_SHA256",
-            "D475F4BDAA96FB8A02EFBC6274E12EFB1B5B35235B24EACA4B238CF04017BD74",
-        ).strip() or None
-        release_signature = os.getenv(
-            "APP_RELEASE_SIGNATURE",
-            "6ABooAaw/CY3jmUoXlcrXTVOGJf/yorwxKZvSgOuB5L+6MPVv2ghfcDlz66nBY6ryK67c9foAygH3sc7+IuyDQ==",
-        ).strip() or None
+        release_sha256 = (
+            os.getenv("APP_RELEASE_SHA256", "F3D6452BF3FD610B9B21E994F5F3BB0E136070AC66E7697EF1BA463A4917004D").strip()
+            or None
+        )
+        release_signature = (
+            os.getenv(
+                "APP_RELEASE_SIGNATURE",
+                "PQ6zf/DkeYGxY3jaqFTKj1u40/xAG6GtJ5WAXQwIN8kn0OCcc6UwqDl8Gx2aChxkoIluRkCv1rtK2ZIT2hojBw==",
+            ).strip()
+            or None
+        )
         release_signature_algorithm = (
             os.getenv("APP_RELEASE_SIGNATURE_ALGORITHM", "ed25519-sha256").strip().lower() or None
             if release_signature
             else None
         )
-        release_label = os.getenv("APP_RELEASE_LABEL", f"GeoMapper Pro Beta v{release_version}").strip() or None
+        release_label = os.getenv("APP_RELEASE_LABEL", f"GeoMapper Pro Stable v{release_display_version}").strip() or None
         release_installer_filename = os.getenv("APP_INSTALLER_FILENAME", "GeoMapperProSetup.exe").strip() or "GeoMapperProSetup.exe"
-        installer_size_raw = os.getenv("APP_INSTALLER_SIZE_BYTES", "204338862").strip()
+        installer_size_raw = os.getenv("APP_INSTALLER_SIZE_BYTES", "210600810").strip()
         release_installer_size = int(installer_size_raw) if installer_size_raw.isdigit() else None
         release_required = os.getenv("APP_UPDATE_REQUIRED", "false").strip().lower() in {"1", "true", "yes"}
 
@@ -572,6 +589,19 @@ def init_db():
             (release_channel,),
         ).fetchone()
 
+        release_metadata_changed = bool(active_release) and (
+            active_release.get("version") != release_version
+            or active_release.get("min_supported_version") != release_min_supported
+            or active_release.get("download_url") != release_download_url
+            or active_release.get("release_notes") != release_notes
+            or active_release.get("sha256") != release_sha256
+            or active_release.get("signature") != release_signature
+            or active_release.get("signature_algorithm") != release_signature_algorithm
+            or active_release.get("release_label") != release_label
+            or active_release.get("installer_filename") != release_installer_filename
+            or active_release.get("installer_size_bytes") != release_installer_size
+            or bool(active_release.get("required")) != release_required
+        )
         should_publish_release = not active_release or _is_newer_version(release_version, active_release.get("version"))
         if should_publish_release:
             if active_release:
@@ -617,20 +647,138 @@ def init_db():
                     release_required,
                 ),
             )
-        elif active_release.get("version") == release_version:
-            metadata_changed = (
-                active_release.get("min_supported_version") != release_min_supported
-                or active_release.get("download_url") != release_download_url
-                or active_release.get("release_notes") != release_notes
-                or active_release.get("sha256") != release_sha256
-                or active_release.get("signature") != release_signature
-                or active_release.get("signature_algorithm") != release_signature_algorithm
-                or active_release.get("release_label") != release_label
-                or active_release.get("installer_filename") != release_installer_filename
-                or active_release.get("installer_size_bytes") != release_installer_size
-                or bool(active_release.get("required")) != release_required
+        elif release_metadata_changed and active_release.get("version") == release_version:
+            conn.execute(
+                """
+                UPDATE app_releases
+                SET version = %s,
+                    min_supported_version = %s,
+                    download_url = %s,
+                    release_notes = %s,
+                    sha256 = %s,
+                    signature = %s,
+                    signature_algorithm = %s,
+                    release_label = %s,
+                    installer_filename = %s,
+                    installer_size_bytes = %s,
+                    required = %s,
+                    published_at = NOW()
+                WHERE id = %s
+                """,
+                (
+                    release_version,
+                    release_min_supported,
+                    release_download_url,
+                    release_notes,
+                    release_sha256,
+                    release_signature,
+                    release_signature_algorithm,
+                    release_label,
+                    release_installer_filename,
+                    release_installer_size,
+                    release_required,
+                    active_release["id"],
+                ),
             )
-            if metadata_changed:
+        elif release_metadata_changed and _is_newer_version(active_release.get("version"), release_version):
+            logger.warning(
+                "Ignoring older %s release metadata from environment: active=%s configured=%s",
+                release_channel,
+                active_release.get("version"),
+                release_version,
+            )
+
+        beta_release = {
+            "channel": "beta",
+            "version": "1.3.12",
+            "min_supported_version": "1.3.8",
+            "download_url": "https://github.com/MOUHANEDXIX/geomapper-pro-downloads/releases/download/v1.3.12-beta/GeoMapperProBetaSetup.exe",
+            "release_notes": (
+                "GeoMapper Pro Beta 1.3.12: experimental build with the AI assistant "
+                "and local Ollama workflow, rebuilt with pinned dependencies and "
+                "internal cleanup. Use stable 1.0 for presentation validation."
+            ),
+            "sha256": "85279ADB77EDC7EB9B1057E43FB378FB25F51D553686268CCA7683433749A2B2",
+            "signature": "FsGoHk2upscnsemKh+UBSL3F1xk1NAm5g21wWeAET9l3OfQXnPzXp+XEnHLf66aMy6MZCmMenXsmiX5KjSbiAQ==",
+            "signature_algorithm": "ed25519-sha256",
+            "release_label": "GeoMapper Pro Beta v1.3.12 - not stable",
+            "installer_filename": "GeoMapperProBetaSetup.exe",
+            "installer_size_bytes": 215308563,
+            "required": False,
+        }
+        active_beta = conn.execute(
+            """
+            SELECT id, version, min_supported_version, download_url,
+                   release_notes, sha256, signature, signature_algorithm,
+                   release_label, installer_filename,
+                   installer_size_bytes, required
+            FROM app_releases
+            WHERE channel = 'beta'
+              AND is_active = TRUE
+            LIMIT 1
+            """
+        ).fetchone()
+        should_publish_beta = not active_beta or _is_newer_version(beta_release["version"], active_beta.get("version"))
+        if should_publish_beta:
+            if active_beta:
+                conn.execute(
+                    """
+                    UPDATE app_releases
+                    SET is_active = FALSE
+                    WHERE id = %s
+                    """,
+                    (active_beta["id"],),
+                )
+            conn.execute(
+                """
+                INSERT INTO app_releases (
+                    channel,
+                    version,
+                    min_supported_version,
+                    download_url,
+                    release_notes,
+                    sha256,
+                    signature,
+                    signature_algorithm,
+                    release_label,
+                    installer_filename,
+                    installer_size_bytes,
+                    required,
+                    is_active
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE)
+                """,
+                (
+                    beta_release["channel"],
+                    beta_release["version"],
+                    beta_release["min_supported_version"],
+                    beta_release["download_url"],
+                    beta_release["release_notes"],
+                    beta_release["sha256"],
+                    beta_release["signature"],
+                    beta_release["signature_algorithm"],
+                    beta_release["release_label"],
+                    beta_release["installer_filename"],
+                    beta_release["installer_size_bytes"],
+                    beta_release["required"],
+                ),
+            )
+        elif active_beta.get("version") == beta_release["version"]:
+            beta_metadata_changed = any(
+                active_beta.get(key) != beta_release[key]
+                for key in (
+                    "min_supported_version",
+                    "download_url",
+                    "release_notes",
+                    "sha256",
+                    "signature",
+                    "signature_algorithm",
+                    "release_label",
+                    "installer_filename",
+                    "installer_size_bytes",
+                )
+            ) or bool(active_beta.get("required")) != beta_release["required"]
+            if beta_metadata_changed:
                 conn.execute(
                     """
                     UPDATE app_releases
@@ -648,17 +796,17 @@ def init_db():
                     WHERE id = %s
                     """,
                     (
-                        release_min_supported,
-                        release_download_url,
-                        release_notes,
-                        release_sha256,
-                        release_signature,
-                        release_signature_algorithm,
-                        release_label,
-                        release_installer_filename,
-                        release_installer_size,
-                        release_required,
-                        active_release["id"],
+                        beta_release["min_supported_version"],
+                        beta_release["download_url"],
+                        beta_release["release_notes"],
+                        beta_release["sha256"],
+                        beta_release["signature"],
+                        beta_release["signature_algorithm"],
+                        beta_release["release_label"],
+                        beta_release["installer_filename"],
+                        beta_release["installer_size_bytes"],
+                        beta_release["required"],
+                        active_beta["id"],
                     ),
                 )
 
@@ -706,6 +854,10 @@ def init_default_admin():
                 (existing["id"],),
             )
             return
+
+        if _is_production_environment() and password == "admin123":
+            logger.error("Refusing to create a production admin with the default password.")
+            raise RuntimeError("DEFAULT_ADMIN_PASSWORD must be changed before creating a production admin.")
 
         # First-run bootstrap: insert the default admin with full access.
         conn.execute(

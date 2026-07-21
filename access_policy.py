@@ -41,7 +41,7 @@ PLAN_CATALOG = {
             "coordinates": True,
             "raster": True,
             "raster_georeferencing": True,
-            "vector": False,
+            "vector": True,
             "ai": False,
             "online_demos": True,
             "download": True,

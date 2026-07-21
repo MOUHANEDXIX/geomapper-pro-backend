@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import os
 import asyncio
-from contextlib import suppress
+from contextlib import asynccontextmanager, suppress
 import logging
 
 from fastapi import Depends, FastAPI, Request
@@ -28,18 +28,36 @@ from access_policy import dashboard_for_user
 from database import cleanup_expired_unverified_users, get_db, init_default_admin
 from models import ChangePasswordRequest, DeactivateAccountRequest, PaymentRequestCreate, ProfileUpdateRequest
 from rate_limit import enforce_rate_limit
-from security import hash_password, verify_password
+from security import _is_production_environment, hash_password, verify_password
 from update_routes import router as update_router
 from website_routes import router as website_router
 from payment_routes import create_payment_request, my_payment_history, router as payment_router
 
-app = FastAPI(
-    title="GeoMapper Pro Backend",
-    version="1.3.8",
-)
-
 logger = logging.getLogger(__name__)
 _expired_user_cleanup_task: asyncio.Task | None = None
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Bootstrap the database/admin, run periodic cleanup, stop it on shutdown."""
+    global _expired_user_cleanup_task
+    init_default_admin()
+    cleanup_expired_unverified_users()
+    if _expired_user_cleanup_task is None or _expired_user_cleanup_task.done():
+        _expired_user_cleanup_task = asyncio.create_task(_cleanup_expired_users_loop())
+    try:
+        yield
+    finally:
+        _expired_user_cleanup_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await _expired_user_cleanup_task
+
+
+app = FastAPI(
+    title="GeoMapper Pro Backend",
+    version="1.3.12",
+    lifespan=lifespan,
+)
 
 
 def cors_origins_from_env() -> list[str]:
@@ -51,6 +69,12 @@ def cors_origins_from_env() -> list[str]:
         if origin.strip()
     ]
     origins = origins or ["*"]
+    if _is_production_environment() and "*" in origins:
+        raise RuntimeError(
+            "BACKEND_CORS_ORIGINS must list explicit origins in production "
+            "(for example https://your-site.example); a wildcard would let "
+            "any website call this API from a browser."
+        )
     allow_local = os.getenv("BACKEND_ALLOW_LOCAL_ORIGINS", "true").strip().lower() not in {"0", "false", "no"}
     if "*" not in origins and allow_local:
         origins.extend(["http://127.0.0.1:5173", "http://localhost:5173"])
@@ -65,32 +89,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-
-@app.on_event("startup")
-def startup_event():
-    """Create the account table and ensure the configured admin exists."""
-    init_default_admin()
-    cleanup_expired_unverified_users()
-
-
-@app.on_event("startup")
-async def start_expired_user_cleanup():
-    """Run periodic cleanup for accounts that never verified their first email."""
-    global _expired_user_cleanup_task
-    if _expired_user_cleanup_task is None or _expired_user_cleanup_task.done():
-        _expired_user_cleanup_task = asyncio.create_task(_cleanup_expired_users_loop())
-
-
-@app.on_event("shutdown")
-async def stop_expired_user_cleanup():
-    """Stop the periodic cleanup task during backend shutdown."""
-    if _expired_user_cleanup_task is None:
-        return
-
-    _expired_user_cleanup_task.cancel()
-    with suppress(asyncio.CancelledError):
-        await _expired_user_cleanup_task
 
 
 async def _cleanup_expired_users_loop():

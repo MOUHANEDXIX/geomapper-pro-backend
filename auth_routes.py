@@ -23,7 +23,7 @@ from models import (
     VerifyEmailRequest,
 )
 from rate_limit import enforce_rate_limit
-from security import create_access_token, hash_password, verify_password
+from security import create_access_token, hash_password, password_needs_rehash, verify_password
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
 logger = logging.getLogger(__name__)
@@ -289,6 +289,15 @@ def login(payload: LoginRequest, request: Request):
 
     if not user or not verify_password(password, user["password_hash"]):
         return AuthResponse(ok=False, message="Incorrect login or password.")
+
+    # Transparently upgrade accounts still on the legacy unsalted SHA-256
+    # format now that the correct password is known.
+    if password_needs_rehash(user["password_hash"]):
+        with get_db() as conn:
+            conn.execute(
+                "UPDATE app_users SET password_hash = %s WHERE id = %s",
+                (hash_password(password), user["id"]),
+            )
 
     if user.get("account_state", ACCOUNT_ACTIVE) != ACCOUNT_ACTIVE:
         return AuthResponse(ok=False, message="This account is unavailable. Contact support for help.")

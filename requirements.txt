@@ -1,7 +1,8 @@
-fastapi
-uvicorn
-psycopg[binary]
-python-dotenv
-passlib[bcrypt]
-python-jose[cryptography]
-pydantic[email]>=2
+# Deployed on Render with Python 3.12 (see render.yaml).
+# Keep versions in sync with the backend section of the root requirements.txt.
+fastapi==0.136.1
+uvicorn==0.47.0
+psycopg[binary]==3.3.4
+python-dotenv==1.2.2
+python-jose[cryptography]==3.5.0
+pydantic[email]==2.13.4
