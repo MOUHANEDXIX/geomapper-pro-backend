@@ -1,0 +1,20 @@
+name: Keep backend awake
+
+on:
+  schedule:
+    # Render's free tier spins down after 15 idle minutes; ping every 10.
+    # GitHub cron has some jitter, so an occasional cold start can still
+    # happen — acceptable on the free plan.
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping healthz
+        run: |
+          code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 90 \
+            https://geomapper-pro-backend.onrender.com/healthz)
+          echo "healthz returned $code"
+          test "$code" = "200"
