@@ -13,6 +13,9 @@ import psycopg
 from dotenv import load_dotenv
 from psycopg.rows import dict_row
 
+from schema_integrity import ensure_integrity_constraints
+from subscription_schema import install_subscription_rules
+
 load_dotenv(Path(__file__).resolve().with_name(".env"), override=True, encoding="utf-8-sig")
 
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -198,6 +201,7 @@ def init_db():
             ON payments (user_id, status, plan_code)
             """
         )
+        ensure_integrity_constraints(conn)
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS subscriptions (
@@ -252,156 +256,7 @@ def init_db():
             EXECUTE FUNCTION set_payment_approval_timestamp()
             """
         )
-        conn.execute(
-            """
-            CREATE OR REPLACE FUNCTION activate_subscription_after_payment()
-            RETURNS TRIGGER AS $$
-            DECLARE
-                plan_days INTEGER;
-                period_start TIMESTAMPTZ;
-                period_end TIMESTAMPTZ;
-                previous_user JSONB;
-            BEGIN
-                IF NEW.status = 'approved'
-                   AND OLD.status IS DISTINCT FROM 'approved' THEN
-                    SELECT duration_days
-                    INTO plan_days
-                    FROM plans
-                    WHERE code = NEW.plan_code
-                      AND active = TRUE;
-
-                    IF plan_days IS NULL OR plan_days <= 0 THEN
-                        RAISE EXCEPTION 'Invalid subscription plan: %', NEW.plan_code;
-                    END IF;
-
-                    SELECT to_jsonb(u)
-                    INTO previous_user
-                    FROM app_users u
-                    WHERE u.id = NEW.user_id;
-
-                    SELECT CASE
-                        WHEN subscription_status = 'active'
-                             AND subscription_expires_at IS NOT NULL
-                             AND subscription_expires_at > NOW()
-                        THEN subscription_expires_at
-                        ELSE NOW()
-                    END
-                    INTO period_start
-                    FROM app_users
-                    WHERE id = NEW.user_id
-                    FOR UPDATE;
-
-                    period_end := period_start + make_interval(days => plan_days);
-
-                    INSERT INTO subscriptions (
-                        user_id,
-                        plan_code,
-                        payment_id,
-                        status,
-                        current_period_start,
-                        current_period_end
-                    )
-                    VALUES (
-                        NEW.user_id,
-                        NEW.plan_code,
-                        NEW.id,
-                        'active',
-                        period_start,
-                        period_end
-                    );
-
-                    UPDATE app_users
-                    SET status = 'approved',
-                        active_plan = NEW.plan_code,
-                        subscription_status = 'active',
-                        subscription_started_at = period_start,
-                        subscription_expires_at = period_end,
-                        last_payment_id = NEW.id
-                    WHERE id = NEW.user_id;
-
-                    INSERT INTO subscription_logs (user_id, event_type, old_value, new_value)
-                    VALUES (
-                        NEW.user_id,
-                        'payment_approved',
-                        previous_user,
-                        jsonb_build_object(
-                            'payment_id', NEW.id,
-                            'plan_code', NEW.plan_code,
-                            'current_period_start', period_start,
-                            'current_period_end', period_end
-                        )
-                    );
-                END IF;
-                RETURN NEW;
-            END;
-            $$ LANGUAGE plpgsql
-            """
-        )
-        conn.execute(
-            """
-            DROP TRIGGER IF EXISTS trg_activate_subscription_after_payment ON payments
-            """
-        )
-        conn.execute(
-            """
-            CREATE TRIGGER trg_activate_subscription_after_payment
-            AFTER UPDATE OF status ON payments
-            FOR EACH ROW
-            EXECUTE FUNCTION activate_subscription_after_payment()
-            """
-        )
-        conn.execute(
-            """
-            DROP FUNCTION IF EXISTS expire_old_subscriptions()
-            """
-        )
-        conn.execute(
-            """
-            CREATE OR REPLACE FUNCTION expire_old_subscriptions()
-            RETURNS INTEGER AS $$
-            DECLARE
-                expired_count INTEGER;
-            BEGIN
-                WITH expired_users AS (
-                    UPDATE app_users
-                    SET subscription_status = 'expired',
-                        status = 'awaiting_payment',
-                        active_plan = 'free'
-                    WHERE role <> 'admin'
-                      AND subscription_status = 'active'
-                      AND subscription_expires_at IS NOT NULL
-                      AND subscription_expires_at <= NOW()
-                    RETURNING id, subscription_expires_at, last_payment_id
-                ),
-                expired_subscriptions AS (
-                    UPDATE subscriptions s
-                    SET status = 'expired'
-                    FROM expired_users u
-                    WHERE s.user_id = u.id
-                      AND s.status = 'active'
-                      AND s.current_period_end <= NOW()
-                    RETURNING s.id
-                ),
-                inserted_logs AS (
-                    INSERT INTO subscription_logs (user_id, event_type, old_value, new_value)
-                    SELECT
-                        id,
-                        'subscription_expired',
-                        NULL,
-                        jsonb_build_object(
-                            'subscription_expires_at', subscription_expires_at,
-                            'last_payment_id', last_payment_id
-                        )
-                    FROM expired_users
-                    RETURNING id
-                )
-                SELECT COUNT(*) INTO expired_count FROM expired_users;
-
-                RETURN expired_count;
-            END;
-            $$ LANGUAGE plpgsql
-            """
-        )
+        install_subscription_rules(conn)
         conn.execute(
             """
             UPDATE app_users
@@ -821,9 +676,10 @@ def init_default_admin():
     email = os.getenv("DEFAULT_ADMIN_EMAIL", "admin@geotun.local")
     password = os.getenv("DEFAULT_ADMIN_PASSWORD", "admin123")
 
-    password_hash = hash_password(password)
-
     with get_db() as conn:
+        # Multiple backend workers may bootstrap together. Serialize the
+        # administrator's existence check and creation across those workers.
+        conn.execute("SELECT pg_advisory_xact_lock(hashtextextended('geomapper-default-admin', 0))")
         # If the admin already exists by username/email, force it back into a
         # usable administrator state instead of creating a duplicate account.
         existing = conn.execute(
@@ -858,6 +714,10 @@ def init_default_admin():
         if _is_production_environment() and password == "admin123":
             logger.error("Refusing to create a production admin with the default password.")
             raise RuntimeError("DEFAULT_ADMIN_PASSWORD must be changed before creating a production admin.")
+
+        # The configured secret is only used for first-run creation. Existing
+        # administrators keep their own password, including after recovery.
+        password_hash = hash_password(password)
 
         # First-run bootstrap: insert the default admin with full access.
         conn.execute(
@@ -897,3 +757,10 @@ def cleanup_expired_unverified_users() -> int:
         ).fetchall()
 
     return len(rows)
+
+
+def expire_subscriptions() -> int:
+    """Run the existing idempotent expiry function without changing its policy."""
+    with get_db() as conn:
+        row = conn.execute("SELECT expire_old_subscriptions() AS expired_count").fetchone()
+    return int(row["expired_count"])

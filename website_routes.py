@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Request
 
@@ -14,6 +13,7 @@ from admin_routes import get_current_user
 from database import get_db
 from email_service import EmailService
 from models import AnalyticsEventRequest, ApiResponse, PlanRequest, SupportRequest
+from payment_requests import lock_payment_request, new_payment_reference
 from rate_limit import enforce_rate_limit
 
 router = APIRouter(tags=["Website"])
@@ -69,6 +69,8 @@ def request_plan(
                 "message": "Invalid plan.",
             }
 
+        lock_payment_request(conn, current_user["id"], payload.plan)
+
         existing = conn.execute(
             """
             SELECT bank_reference
@@ -88,7 +90,7 @@ def request_plan(
                 "bank_reference": existing["bank_reference"],
             }
 
-        bank_reference = f"GMP-{payload.plan.upper()}-{current_user['id']}-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
+        bank_reference = new_payment_reference(payload.plan, current_user["id"])
         conn.execute(
             """
             INSERT INTO payments (

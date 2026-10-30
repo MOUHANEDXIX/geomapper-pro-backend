@@ -1,5 +1,4 @@
-# Deployed on Render with Python 3.12 (see render.yaml).
-# Keep versions in sync with the backend section of the root requirements.txt.
+-c requirements.lock.txt
 fastapi==0.136.1
 uvicorn==0.47.0
 psycopg[binary]==3.3.4

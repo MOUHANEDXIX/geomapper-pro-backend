@@ -5,7 +5,18 @@ from __future__ import annotations
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
 
-class RegisterRequest(BaseModel):
+class PasswordRequest(BaseModel):
+    """Reject empty/blank credentials while preserving every supplied character."""
+
+    @field_validator("password", "new_password", "current_password", check_fields=False)
+    @classmethod
+    def validate_password_content(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Password must contain a non-whitespace character.")
+        return value
+
+
+class RegisterRequest(PasswordRequest):
     """Payload for creating a new user account."""
 
     username: str = Field(min_length=2, max_length=80)
@@ -13,7 +24,7 @@ class RegisterRequest(BaseModel):
     password: str = Field(min_length=8, max_length=128)
 
 
-class LoginRequest(BaseModel):
+class LoginRequest(PasswordRequest):
     """Payload for username/email plus password sign-in."""
 
     login: str = Field(min_length=1)
@@ -42,7 +53,7 @@ class ForgotPasswordRequest(BaseModel):
     email: EmailStr
 
 
-class ResetPasswordRequest(BaseModel):
+class ResetPasswordRequest(PasswordRequest):
     """Payload for replacing a password after validating a reset code."""
 
     email: EmailStr
@@ -50,14 +61,14 @@ class ResetPasswordRequest(BaseModel):
     new_password: str = Field(min_length=8, max_length=128)
 
 
-class ChangePasswordRequest(BaseModel):
+class ChangePasswordRequest(PasswordRequest):
     """Payload for an authenticated password change."""
 
     current_password: str = Field(min_length=1, max_length=128)
     new_password: str = Field(min_length=8, max_length=128)
 
 
-class DeactivateAccountRequest(BaseModel):
+class DeactivateAccountRequest(PasswordRequest):
     """Payload for self-service account deactivation."""
 
     password: str = Field(min_length=1, max_length=128)

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -11,6 +10,7 @@ from access_policy import dashboard_for_user
 from admin_routes import get_current_user, require_admin
 from database import get_db
 from models import ApiResponse, PaymentNoteRequest, PaymentRejectRequest, PaymentRequestCreate
+from payment_requests import lock_payment_request, new_payment_reference
 from rate_limit import enforce_rate_limit
 
 
@@ -25,7 +25,7 @@ def create_payment_request(
 ):
     """Create or return one pending manual bank-transfer request."""
 
-    enforce_rate_limit(request, "payment_request", str(current_user["id"]))
+    enforce_rate_limit(request, "plan_request", str(current_user["id"]))
     if current_user["role"] == "admin":
         return {
             "ok": False,
@@ -47,6 +47,8 @@ def create_payment_request(
                 "ok": False,
                 "message": "Invalid plan code.",
             }
+
+        lock_payment_request(conn, current_user["id"], payload.plan_code)
 
         existing = conn.execute(
             """
@@ -320,8 +322,7 @@ def payment_to_public(row: dict) -> dict:
 
 
 def _bank_reference(plan_code: str, user_id: int) -> str:
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
-    return f"GMP-{plan_code.upper()}-{user_id}-{stamp}"
+    return new_payment_reference(plan_code, user_id)
 
 
 def _iso(value) -> str | None:

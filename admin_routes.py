@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from database import get_db
 from models import AdminSubscriptionRenewRequest, ApiResponse, StatusUpdateRequest
+from payment_requests import new_payment_reference
 from security import decode_access_token
-from access_policy import active_plan_code, can_access_module, days_remaining, subscription_diagnostic
+from access_policy import active_plan_code, can_access_module, days_remaining, is_subscription_active, subscription_diagnostic
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
 
@@ -46,11 +46,14 @@ def get_current_user(
     # The token only stores a user ID, so load fresh role/status information on
     # every protected request. The session ID enforces one active machine.
     with get_db() as conn:
+        # Advance a due paid period before returning the fresh authorization
+        # state; the same row lock is shared with approval and suspension.
+        conn.execute("SELECT refresh_user_subscription(%s)", (int(user_id),))
         user = conn.execute(
             """
             SELECT u.id, u.username, u.email, u.role, u.status, u.account_state,
                    u.payment_plan, u.requested_plan, u.active_plan,
-                   u.subscription_status, u.subscription_started_at,
+                   u.subscription_status, u.subscription_suspended, u.next_plan, u.next_plan_effective_at, u.subscription_started_at,
                    u.subscription_expires_at, u.last_payment_id,
                    u.email_verified, u.avatar_path, u.created_at,
                    s.id AS session_id,
@@ -130,6 +133,9 @@ def public_user(user: dict) -> dict:
         "active_plan": active_plan_code(user),
         "stored_active_plan": user.get("active_plan") or "free",
         "subscription_status": user.get("subscription_status") or "inactive",
+        "subscription_suspended": bool(user.get("subscription_suspended", False)),
+        "next_plan": user.get("next_plan"),
+        "next_plan_effective_at": user["next_plan_effective_at"].isoformat() if user.get("next_plan_effective_at") else None,
         "subscription_started_at": user["subscription_started_at"].isoformat() if user.get("subscription_started_at") else None,
         "subscription_expires_at": user["subscription_expires_at"].isoformat() if user.get("subscription_expires_at") else None,
         "last_payment_id": user.get("last_payment_id"),
@@ -154,11 +160,12 @@ def public_user(user: dict) -> dict:
 def list_users(_: dict = Depends(require_admin)):
     """List all accounts for the admin dashboard."""
     with get_db() as conn:
+        conn.execute("SELECT refresh_subscription_states()")
         rows = conn.execute(
             """
             SELECT id, username, email, role, status, account_state,
                    payment_plan, requested_plan, active_plan,
-                   subscription_status, subscription_started_at,
+                   subscription_status, subscription_suspended, next_plan, next_plan_effective_at, subscription_started_at,
                    subscription_expires_at, last_payment_id,
                    email_verified, avatar_path, created_at,
                    EXISTS (
@@ -223,7 +230,8 @@ def update_user_status(
         if user["role"] == "admin":
             return ApiResponse(ok=False, message="The administrator status cannot be changed.")
 
-        # Status drives desktop access to paid Raster/Vector modules.
+        # Legacy payment bookkeeping is separate from premium suspension and
+        # from the active subscription's entitlement dates.
         conn.execute(
             """
             UPDATE app_users
@@ -238,6 +246,41 @@ def update_user_status(
         )
 
     return ApiResponse(ok=True, message=f"Status updated: {status}")
+
+
+def _set_premium_suspension(user_id: int, suspended: bool):
+    with get_db() as conn:
+        conn.execute("SELECT refresh_user_subscription(%s)", (user_id,))
+        user = conn.execute("SELECT * FROM app_users WHERE id=%s FOR UPDATE", (user_id,)).fetchone()
+        if not user:
+            return {"ok": False, "message": "User not found."}
+        if user["role"] == "admin":
+            return {"ok": False, "message": "Administrator premium access cannot be suspended."}
+        if not suspended and not is_subscription_active({**user, "subscription_suspended": False}):
+            return {"ok": False, "message": "Resume requires an active, unexpired paid subscription."}
+        previous = bool(user.get("subscription_suspended", False))
+        if previous != suspended:
+            conn.execute("UPDATE app_users SET subscription_suspended=%s WHERE id=%s", (suspended, user_id))
+            conn.execute("""INSERT INTO subscription_logs(user_id,event_type,old_value,new_value)
+                VALUES (%s,%s,jsonb_build_object('subscription_suspended',%s::boolean),
+                       jsonb_build_object('subscription_suspended',%s::boolean))""",
+                (user_id, "subscription_suspended" if suspended else "subscription_resumed", previous, suspended))
+    return {"ok": True, "message": (
+        "Premium access suspended. Sign-in and coordinates remain available; subscription dates continue."
+        if suspended else "Premium access resumed for the existing subscription period."
+    )}
+
+
+@router.patch("/users/{user_id}/subscriptions/suspend")
+def suspend_user_subscription(user_id: int, _: dict = Depends(require_admin)):
+    """Suspend premium modules separately from legacy unpaid bookkeeping."""
+    return _set_premium_suspension(user_id, True)
+
+
+@router.patch("/users/{user_id}/subscriptions/resume")
+def resume_user_subscription(user_id: int, _: dict = Depends(require_admin)):
+    """Resume only a currently valid paid period, without extending its dates."""
+    return _set_premium_suspension(user_id, False)
 
 
 @router.post("/users/{user_id}/subscriptions/renew")
@@ -356,5 +399,4 @@ def delete_user(
 
 
 def _admin_bank_reference(plan_code: str, user_id: int) -> str:
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
-    return f"GMP-ADMIN-{plan_code.upper()}-{user_id}-{stamp}"
+    return new_payment_reference(plan_code, user_id, admin=True)

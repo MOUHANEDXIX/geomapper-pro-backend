@@ -7,6 +7,7 @@ import secrets
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
+from psycopg.errors import UniqueViolation
 
 from access_policy import active_plan_code, can_access_module, days_remaining, subscription_diagnostic
 from admin_routes import get_current_user
@@ -90,6 +91,9 @@ def user_to_public_dict(user: dict) -> dict:
         "active_plan": active_plan_code(user),
         "stored_active_plan": user.get("active_plan") or "free",
         "subscription_status": user.get("subscription_status") or "inactive",
+        "subscription_suspended": bool(user.get("subscription_suspended", False)),
+        "next_plan": user.get("next_plan"),
+        "next_plan_effective_at": _iso_timestamp(user.get("next_plan_effective_at")),
         "subscription_started_at": _iso_timestamp(user.get("subscription_started_at")),
         "subscription_expires_at": _iso_timestamp(user.get("subscription_expires_at")),
         "last_payment_id": user.get("last_payment_id"),
@@ -128,6 +132,23 @@ def _session_text(value: str | None, fallback: str, limit: int) -> str:
     return text[:limit]
 
 
+def lock_account_credentials(conn, user_id: int) -> None:
+    """Serialize credential checks, session issuance and password replacement."""
+    conn.execute("SELECT pg_advisory_xact_lock(%s)", (int(user_id),))
+
+
+def revoke_password_sessions(conn, user_id: int, reason: str) -> None:
+    """Revoke every active login in the same transaction as a password update."""
+    conn.execute(
+        """
+        UPDATE app_sessions
+        SET revoked_at = NOW(), revoked_reason = %s
+        WHERE user_id = %s AND revoked_at IS NULL
+        """,
+        (reason, int(user_id)),
+    )
+
+
 def _create_login_session(conn, user: dict, payload: LoginRequest, request: Request) -> tuple[str, bool]:
     """Create the only active session for this account and revoke older ones."""
     user_id = int(user["id"])
@@ -136,8 +157,7 @@ def _create_login_session(conn, user: dict, payload: LoginRequest, request: Requ
     app_version = request.headers.get("X-GeoMapper-App-Version")
     user_agent = request.headers.get("User-Agent")
 
-    # Serialize login for this user so the partial unique index cannot race.
-    conn.execute("SELECT pg_advisory_xact_lock(%s)", (user_id,))
+    # The caller holds the account lock from before password verification.
     previous = conn.execute(
         """
         SELECT id
@@ -193,7 +213,7 @@ def register_user(payload: RegisterRequest, request: Request):
     cleanup_expired_unverified_users()
     username = payload.username.strip()
     email = str(payload.email).strip().lower()
-    password = payload.password.strip()
+    password = payload.password
     enforce_rate_limit(request, "signup", email)
     code, expires_at = generate_code()
 
@@ -230,6 +250,8 @@ def register_user(payload: RegisterRequest, request: Request):
                 (username, email, hash_password(password), STATUS_AWAITING, code, expires_at),
             )
             send_verification_email_or_raise(email, username, code, "Registration")
+    except UniqueViolation:
+        return ApiResponse(ok=False, message="Username or email is already in use.")
     except VerificationEmailDeliveryError:
         return ApiResponse(
             ok=False,
@@ -256,10 +278,24 @@ def login(payload: LoginRequest, request: Request):
     """Authenticate a user/admin and return a JWT plus public profile."""
     cleanup_expired_unverified_users()
     login_value = payload.login.strip()
-    password = payload.password.strip()
+    password = payload.password
     enforce_rate_limit(request, "login", login_value)
 
     with get_db() as conn:
+        identity = conn.execute(
+            """
+            SELECT id FROM app_users
+            WHERE LOWER(username) = LOWER(%s) OR LOWER(email) = LOWER(%s)
+            """,
+            (login_value, login_value),
+        ).fetchone()
+        if not identity:
+            return AuthResponse(ok=False, message="Incorrect login or password.")
+
+        lock_account_credentials(conn, identity["id"])
+        conn.execute("SELECT refresh_user_subscription(%s)", (identity["id"],))
+        # Re-read after waiting for a reset/change transaction. A password that
+        # was valid before that transaction must not create a surviving session.
         user = conn.execute(
             """
             SELECT u.*,
@@ -281,31 +317,33 @@ def login(payload: LoginRequest, request: Request):
                        LIMIT 1
                    ) AS last_payment_status
             FROM app_users u
-            WHERE LOWER(u.username) = LOWER(%s)
-               OR LOWER(u.email) = LOWER(%s)
+            WHERE u.id = %s
+              AND (LOWER(u.username) = LOWER(%s) OR LOWER(u.email) = LOWER(%s))
+            FOR UPDATE OF u
             """,
-            (login_value, login_value),
+            (identity["id"], login_value, login_value),
         ).fetchone()
 
-    if not user or not verify_password(password, user["password_hash"]):
-        return AuthResponse(ok=False, message="Incorrect login or password.")
+        if not user or not verify_password(password, user["password_hash"]):
+            return AuthResponse(ok=False, message="Incorrect login or password.")
 
-    # Transparently upgrade accounts still on the legacy unsalted SHA-256
-    # format now that the correct password is known.
-    if password_needs_rehash(user["password_hash"]):
-        with get_db() as conn:
-            conn.execute(
-                "UPDATE app_users SET password_hash = %s WHERE id = %s",
-                (hash_password(password), user["id"]),
-            )
+        if user.get("account_state", ACCOUNT_ACTIVE) != ACCOUNT_ACTIVE:
+            return AuthResponse(ok=False, message="This account is unavailable. Contact support for help.")
 
-    if user.get("account_state", ACCOUNT_ACTIVE) != ACCOUNT_ACTIVE:
-        return AuthResponse(ok=False, message="This account is unavailable. Contact support for help.")
+        if user["role"] != "admin" and not bool(user["email_verified"]):
+            return AuthResponse(ok=False, message="Verify your email before signing in.")
 
-    if user["role"] != "admin" and not bool(user["email_verified"]):
-        return AuthResponse(ok=False, message="Verify your email before signing in.")
+        # Upgrade a valid legacy credential while the same account lock is
+        # held, so password replacement and session issuance stay atomic.
+        if password_needs_rehash(user["password_hash"]):
+            # Legacy registration/reset routes stripped surrounding spaces.
+            # Preserve that historical credential during the one-time upgrade;
+            # new exact-format password changes never pass through this path.
+            upgraded_hash = hash_password(password.strip())
+            conn.execute("UPDATE app_users SET password_hash = %s WHERE id = %s",
+                         (upgraded_hash, user["id"]))
+            user["password_hash"] = upgraded_hash
 
-    with get_db() as conn:
         session_id, replaced_session = _create_login_session(conn, user, payload, request)
 
     token = create_access_token({"sub": str(user["id"]), "role": user["role"], "sid": session_id})
@@ -454,15 +492,26 @@ def forgot_password(payload: ForgotPasswordRequest, request: Request, background
     code, expires_at = generate_code()
 
     with get_db() as conn:
-        user = conn.execute(
+        identity = conn.execute(
             """
-            SELECT id, username
+            SELECT id
             FROM app_users
             WHERE LOWER(email) = LOWER(%s)
               AND account_state = 'active'
             """,
             (email,),
         ).fetchone()
+        user = None
+        if identity:
+            lock_account_credentials(conn, identity["id"])
+            user = conn.execute(
+                """
+                SELECT id, username FROM app_users
+                WHERE id = %s AND LOWER(email) = LOWER(%s) AND account_state = 'active'
+                FOR UPDATE
+                """,
+                (identity["id"], email),
+            ).fetchone()
         if user:
             conn.execute(
                 """
@@ -488,14 +537,26 @@ def reset_password(payload: ResetPasswordRequest, request: Request):
     enforce_rate_limit(request, "reset_password", email)
 
     with get_db() as conn:
+        identity = conn.execute(
+            """
+            SELECT id FROM app_users
+            WHERE LOWER(email) = LOWER(%s) AND account_state = 'active'
+            """,
+            (email,),
+        ).fetchone()
+        if not identity:
+            return ApiResponse(ok=False, message="The reset code is invalid or expired.")
+
+        lock_account_credentials(conn, identity["id"])
         user = conn.execute(
             """
             SELECT id, password_reset_code, password_reset_expires_at
             FROM app_users
-            WHERE LOWER(email) = LOWER(%s)
+            WHERE id = %s AND LOWER(email) = LOWER(%s)
               AND account_state = 'active'
+            FOR UPDATE
             """,
-            (email,),
+            (identity["id"], email),
         ).fetchone()
 
         if not user:
@@ -518,7 +579,8 @@ def reset_password(payload: ResetPasswordRequest, request: Request):
                 password_reset_expires_at = NULL
             WHERE id = %s
             """,
-            (hash_password(payload.new_password.strip()), user["id"]),
+            (hash_password(payload.new_password), user["id"]),
         )
+        revoke_password_sessions(conn, user["id"], "password_reset")
 
     return ApiResponse(ok=True, message="Password updated successfully. You can now sign in.")

@@ -121,6 +121,8 @@ def is_subscription_active(user: dict) -> bool:
 
     if user.get("role") == "admin":
         return True
+    if user.get("subscription_suspended", False):
+        return False
 
     plan = str(user.get("active_plan") or "").strip().lower()
     if plan == "free":
@@ -179,6 +181,9 @@ def dashboard_for_user(user: dict) -> dict:
         "active_plan": plan_code,
         "stored_active_plan": user.get("active_plan") or "free",
         "subscription_status": _normalized_text(user.get("subscription_status")) or "inactive",
+        "subscription_suspended": bool(user.get("subscription_suspended", False)),
+        "next_plan": user.get("next_plan"),
+        "next_plan_effective_at": _iso_datetime(user.get("next_plan_effective_at")),
         "subscription_started_at": _iso_datetime(user.get("subscription_started_at")),
         "subscription_expires_at": _iso_datetime(user.get("subscription_expires_at")),
         "days_remaining": days_remaining(user),
@@ -197,6 +202,8 @@ def subscription_diagnostic(user: dict) -> str | None:
     """Explain why a stored paid plan is not currently usable."""
     if not user or user.get("role") == "admin":
         return None
+    if user.get("subscription_suspended", False):
+        return "Premium access is suspended by an administrator."
     stored_plan = _normalized_text(user.get("active_plan") or user.get("stored_active_plan"))
     if stored_plan not in {"plus", "pro"}:
         stored_plan = _normalized_text(user.get("payment_plan"))
