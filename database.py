@@ -545,20 +545,21 @@ def init_db():
 
         beta_release = {
             "channel": "beta",
-            "version": "1.3.12",
+            "version": "1.3.13",
             "min_supported_version": "1.3.8",
-            "download_url": "https://github.com/MOUHANEDXIX/geomapper-pro-downloads/releases/download/v1.3.12-beta/GeoMapperProBetaSetup.exe",
+            "download_url": "https://github.com/MOUHANEDXIX/geomapper-pro-downloads/releases/download/v1.3.13-beta/GeoMapperProBetaSetup.exe",
             "release_notes": (
-                "GeoMapper Pro Beta 1.3.12: experimental build with the AI assistant "
-                "and local Ollama workflow, rebuilt with pinned dependencies and "
-                "internal cleanup. Use stable 1.0 for presentation validation."
+                "GeoMapper Pro Beta 1.3.13 contains the complete reviewed update plus "
+                "the beta AI assistant and local Ollama workflow. Fit controls and "
+                "held-out raster checkpoints are reported separately, and raster Z "
+                "values remain unchanged."
             ),
-            "sha256": "85279ADB77EDC7EB9B1057E43FB378FB25F51D553686268CCA7683433749A2B2",
-            "signature": "FsGoHk2upscnsemKh+UBSL3F1xk1NAm5g21wWeAET9l3OfQXnPzXp+XEnHLf66aMy6MZCmMenXsmiX5KjSbiAQ==",
+            "sha256": "01C49155BED23BD935843D6E93EEC0F00ADAD733EC1187C29AFBB1E3A21C272D",
+            "signature": "sLvRTRPjwtkmLlcys9MDZgE0HEQ69V17r1toChLqZkvqwEH10SdEbQWrgKUVQKNKBVJCFy7dgfBxhxdm84RjBA==",
             "signature_algorithm": "ed25519-sha256",
-            "release_label": "GeoMapper Pro Beta v1.3.12 - not stable",
+            "release_label": "GeoMapper Pro Beta v1.3.13 - not stable",
             "installer_filename": "GeoMapperProBetaSetup.exe",
-            "installer_size_bytes": 215308563,
+            "installer_size_bytes": 213664894,
             "required": False,
         }
         active_beta = conn.execute(
