@@ -13,6 +13,7 @@ from email.utils import formataddr
 from pathlib import Path
 
 from dotenv import load_dotenv
+from staging_guards import require_allowed_staging_recipient
 
 load_dotenv(Path(__file__).resolve().with_name(".env"), override=True, encoding="utf-8-sig")
 logger = logging.getLogger(__name__)
@@ -85,6 +86,7 @@ class EmailService:
 
     def _send_text(self, to_email: str, recipient_name: str, subject: str, text: str) -> None:
         """Send one plain-text transactional email through the configured provider."""
+        require_allowed_staging_recipient(to_email)
         if self.email_provider == "smtp":
             self._send_with_smtp(to_email, subject, text)
             return

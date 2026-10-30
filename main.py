@@ -14,6 +14,7 @@ import logging
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from psycopg.errors import UniqueViolation
 
 from auth_routes import (
@@ -28,10 +29,12 @@ from auth_routes import (
 )
 from admin_routes import SESSION_INVALID_DETAIL, get_current_user, router as admin_router
 from access_policy import dashboard_for_user
-from database import cleanup_expired_unverified_users, expire_subscriptions, get_db, init_default_admin
+from database import DATABASE_URL, cleanup_expired_unverified_users, expire_subscriptions, get_db, init_default_admin
 from models import ChangePasswordRequest, DeactivateAccountRequest, PaymentRequestCreate, ProfileUpdateRequest
 from rate_limit import enforce_rate_limit
+from readiness import database_is_ready
 from security import _is_production_environment, hash_password, verify_password
+from staging_guards import validate_staging_configuration
 from update_routes import router as update_router
 from website_routes import router as website_router
 from payment_routes import create_payment_request, my_payment_history, router as payment_router
@@ -89,6 +92,7 @@ app.add_middleware(
 
 def startup_event():
     """Create the account table and ensure the configured admin exists."""
+    validate_staging_configuration(DATABASE_URL)
     init_default_admin()
     cleanup_expired_unverified_users()
     expire_subscriptions()
@@ -149,6 +153,13 @@ def healthz():
         "message": "GeoMapper Pro backend is healthy.",
         "version": app.version,
     }
+
+
+@app.get("/readyz")
+def readyz():
+    """Check database availability without running account maintenance."""
+    ready = database_is_ready(DATABASE_URL)
+    return JSONResponse(status_code=200 if ready else 503, content={"ok": ready})
 
 
 @app.get("/me")
