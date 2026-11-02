@@ -31,7 +31,7 @@ from admin_routes import SESSION_INVALID_DETAIL, get_current_user, router as adm
 from access_policy import dashboard_for_user
 from database import DATABASE_URL, cleanup_expired_unverified_users, expire_subscriptions, get_db, init_default_admin
 from models import ChangePasswordRequest, DeactivateAccountRequest, PaymentRequestCreate, ProfileUpdateRequest
-from rate_limit import enforce_rate_limit
+from rate_limit import cleanup_expired_rate_limits, enforce_rate_limit, validate_rate_limit_configuration
 from readiness import database_is_ready
 from security import _is_production_environment, hash_password, verify_password
 from staging_guards import validate_staging_configuration
@@ -93,6 +93,9 @@ app.add_middleware(
 def startup_event():
     """Create the account table and ensure the configured admin exists."""
     validate_staging_configuration(DATABASE_URL)
+    rate_limit_database_url = validate_rate_limit_configuration()
+    if rate_limit_database_url:
+        validate_staging_configuration(rate_limit_database_url)
     init_default_admin()
     cleanup_expired_unverified_users()
     expire_subscriptions()
@@ -124,7 +127,8 @@ async def _cleanup_expired_users_loop():
     while True:
         await asyncio.sleep(60)
         for operation, label in ((cleanup_expired_unverified_users, "Expired unverified account cleanup"),
-                                 (expire_subscriptions, "Subscription expiry")):
+                                 (expire_subscriptions, "Subscription expiry"),
+                                 (cleanup_expired_rate_limits, "Shared rate-limit cleanup")):
             try:
                 count = operation()
                 if count:

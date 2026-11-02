@@ -1,4 +1,4 @@
-"""Small process-local rate limiter for sensitive public endpoints."""
+"""Sensitive-endpoint limits with local storage or explicit shared PostgreSQL."""
 
 from __future__ import annotations
 
@@ -37,6 +37,41 @@ _lock = threading.Lock()
 
 def _enabled() -> bool:
     return os.getenv("RATE_LIMIT_ENABLED", "true").strip().lower() not in {"0", "false", "no"}
+
+
+def validate_rate_limit_configuration() -> str | None:
+    """Reject invalid opt-in settings before startup writes; never install DDL.
+
+    Return the selected shared database URL so staging can validate its
+    destination using the same existing production-isolation guard.
+    """
+    if not _enabled():
+        return None
+    backend = os.getenv("RATE_LIMIT_BACKEND", "memory").strip().lower()
+    if backend == "memory":
+        return None
+    if backend != "postgres":
+        raise RuntimeError("RATE_LIMIT_BACKEND must be memory or postgres.")
+    from rate_limit_store import configuration_from_environment
+    return configuration_from_environment().database_url
+
+
+def cleanup_expired_rate_limits() -> int:
+    """Housekeep one shared batch; the default local store never connects."""
+    if not _enabled():
+        return 0
+    backend = os.getenv("RATE_LIMIT_BACKEND", "memory").strip().lower()
+    if backend == "memory":
+        return 0
+    try:
+        if backend != "postgres":
+            raise RuntimeError("Invalid rate-limit backend.")
+        from rate_limit_store import cleanup_expired
+        return cleanup_expired(1000)
+    except Exception:
+        # Housekeeping logs its exceptions. Suppress driver/config details and
+        # their chain so connection strings never become application logs.
+        raise RuntimeError("Shared rate-limit cleanup is unavailable.") from None
 
 
 @lru_cache(maxsize=8)
@@ -101,6 +136,20 @@ def enforce_rate_limit(request: Request, action: str, identifier: str | None = N
         return
 
     limit, window_seconds = RATE_LIMITS[action]
+    backend = os.getenv("RATE_LIMIT_BACKEND", "memory").strip().lower()
+    if backend != "memory":
+        try:
+            if backend != "postgres":
+                raise RuntimeError("Invalid rate-limit backend.")
+            from rate_limit_store import bucket_keys, consume
+            keys = bucket_keys(action, _client_ip(request), identifier,
+                               identifier_limited=action in IDENTIFIER_LIMITED_ACTIONS)
+            allowed = consume(keys, limit, window_seconds)
+        except Exception:
+            raise HTTPException(status_code=503, detail="Request protection is temporarily unavailable. Please try again later.") from None
+        if not allowed:
+            raise HTTPException(status_code=429, detail="Too many attempts. Please try again later.")
+        return
     digest = _identifier_digest(identifier)
     keys = [f"{action}:client:{_client_ip(request)}:{digest}"]
     if digest != "-" and action in IDENTIFIER_LIMITED_ACTIONS:
