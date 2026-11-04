@@ -52,7 +52,7 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(
     title="GeoMapper Pro Backend",
-    version="1.3.13",
+    version="1.3.14",
     lifespan=lifespan,
 )
 

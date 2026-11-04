@@ -544,23 +544,18 @@ def init_db():
             )
 
         beta_release = {
-            "channel": "beta",
-            "version": "1.3.13",
-            "min_supported_version": "1.3.8",
-            "download_url": "https://github.com/MOUHANEDXIX/geomapper-pro-downloads/releases/download/v1.3.13-beta/GeoMapperProBetaSetup.exe",
-            "release_notes": (
-                "GeoMapper Pro Beta 1.3.13 contains the complete reviewed update plus "
-                "the beta AI assistant and local Ollama workflow. Fit controls and "
-                "held-out raster checkpoints are reported separately, and raster Z "
-                "values remain unchanged."
-            ),
-            "sha256": "01C49155BED23BD935843D6E93EEC0F00ADAD733EC1187C29AFBB1E3A21C272D",
-            "signature": "sLvRTRPjwtkmLlcys9MDZgE0HEQ69V17r1toChLqZkvqwEH10SdEbQWrgKUVQKNKBVJCFy7dgfBxhxdm84RjBA==",
-            "signature_algorithm": "ed25519-sha256",
-            "release_label": "GeoMapper Pro Beta v1.3.13 - not stable",
-            "installer_filename": "GeoMapperProBetaSetup.exe",
-            "installer_size_bytes": 213664894,
-            "required": False,
+            'channel': 'beta',
+            'version': '1.3.14',
+            'min_supported_version': '1.3.8',
+            'download_url': 'https://github.com/MOUHANEDXIX/geomapper-pro-downloads/releases/download/v1.3.14-beta/GeoMapperProBetaSetup.exe',
+            'release_notes': 'GeoMapper Pro Beta 1.3.14 includes the Stable 1.0.6 raster and session-safety improvements plus the beta AI assistant and local Ollama workflow. Ordinary input Z and the numerical model remain unchanged.',
+            'sha256': 'C0D976791DC1B143C598FA085CA5D51BB3233619B01E00224F60B983D41B1E75',
+            'signature': 'W7Fnu7SrLUSDjWKanWgje6s7qoE1meGpEnZpDWN1NRJatwRTuNY6oOqcQHVlPgKi++/DAsaCIBaToOARtRvpCQ==',
+            'signature_algorithm': 'ed25519-sha256',
+            'release_label': 'GeoMapper Pro Beta v1.3.14',
+            'installer_filename': 'GeoMapperProBetaSetup.exe',
+            'installer_size_bytes': 213678937,
+            'required': False,
         }
         active_beta = conn.execute(
             """
