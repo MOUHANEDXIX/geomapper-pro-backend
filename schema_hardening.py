@@ -85,8 +85,13 @@ def harden_backend_schema(connection) -> None:
                   AND old_index.indclass=replacement.indclass
                   AND old_index.indcollation=replacement.indcollation
                   AND old_index.indoption=replacement.indoption
-                  AND old_index.indexprs::text IS NOT DISTINCT FROM replacement.indexprs::text
-                  AND old_index.indpred::text IS NOT DISTINCT FROM replacement.indpred::text
+                  -- pg_node_tree text can retain parser locations (notably
+                  -- PostgreSQL 16). Compare the reconstructed expressions so
+                  -- equivalent definitions do not depend on source offsets.
+                  AND pg_get_expr(old_index.indexprs, old_index.indrelid)
+                      IS NOT DISTINCT FROM pg_get_expr(replacement.indexprs, replacement.indrelid)
+                  AND pg_get_expr(old_index.indpred, old_index.indrelid)
+                      IS NOT DISTINCT FROM pg_get_expr(replacement.indpred, replacement.indrelid)
                   AND old_class.relam=replacement_class.relam
                   AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conindid=old_index.indexrelid);
                 IF duplicate_name IS NOT NULL THEN
