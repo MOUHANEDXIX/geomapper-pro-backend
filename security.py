@@ -12,7 +12,8 @@ from pathlib import Path
 from typing import Optional
 
 from dotenv import load_dotenv
-from jose import JWTError, jwt
+import jwt
+from jwt import InvalidTokenError
 
 load_dotenv(Path(__file__).resolve().with_name(".env"), override=True, encoding="utf-8-sig")
 
@@ -129,5 +130,5 @@ def decode_access_token(token: str) -> dict:
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
         return payload
-    except JWTError:
+    except InvalidTokenError:
         return {}

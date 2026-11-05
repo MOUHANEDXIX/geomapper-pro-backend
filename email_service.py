@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import smtplib
+import ssl
 import urllib.error
 import urllib.request
 from email.message import EmailMessage
@@ -177,13 +178,15 @@ class EmailService:
         # Port 465 expects SMTP over SSL from the first byte; other ports use
         # STARTTLS after connecting.
         if self.smtp_port == 465:
-            with smtplib.SMTP_SSL(self.smtp_host, self.smtp_port, timeout=20) as server:
+            with smtplib.SMTP_SSL(
+                self.smtp_host, self.smtp_port, timeout=20, context=ssl.create_default_context(),
+            ) as server:
                 server.login(self.smtp_email, self.smtp_password)
                 server.send_message(msg)
             return
 
         with smtplib.SMTP(self.smtp_host, self.smtp_port, timeout=20) as server:
-            server.starttls()
+            server.starttls(context=ssl.create_default_context())
             server.login(self.smtp_email, self.smtp_password)
             server.send_message(msg)
 

@@ -18,12 +18,13 @@ def install_subscription_rules(connection):
     connection.execute("""CREATE TRIGGER trg_activate_subscription_after_payment
         AFTER UPDATE OF status ON payments FOR EACH ROW EXECUTE FUNCTION activate_subscription_after_payment()""")
     connection.execute("""CREATE OR REPLACE FUNCTION expire_old_subscriptions() RETURNS INTEGER
-        LANGUAGE plpgsql AS $$ BEGIN RETURN refresh_subscription_states(); END; $$""")
+        LANGUAGE plpgsql SET search_path TO pg_catalog, public, pg_temp
+        AS $$ BEGIN RETURN refresh_subscription_states(); END; $$""")
 
 
 REFRESH_USER_SQL = """
 CREATE OR REPLACE FUNCTION refresh_user_subscription(p_user_id BIGINT)
-RETURNS BOOLEAN LANGUAGE plpgsql AS $$
+RETURNS BOOLEAN LANGUAGE plpgsql SET search_path TO pg_catalog, public, pg_temp AS $$
 DECLARE
     current_user_row app_users%ROWTYPE;
     due subscriptions%ROWTYPE;
@@ -83,14 +84,23 @@ $$
 
 REFRESH_ALL_SQL = """
 CREATE OR REPLACE FUNCTION refresh_subscription_states()
-RETURNS INTEGER LANGUAGE plpgsql AS $$
+RETURNS INTEGER LANGUAGE plpgsql SET search_path TO pg_catalog, public, pg_temp AS $$
 DECLARE
     item RECORD;
     changed_count INTEGER := 0;
 BEGIN
-    FOR item IN SELECT id FROM app_users
-        WHERE role<>'admin' AND (subscription_status='active' OR next_plan IS NOT NULL)
-        ORDER BY id
+    FOR item IN SELECT account.id FROM app_users AS account
+        WHERE account.role<>'admin' AND (
+            (account.subscription_status='active' AND account.subscription_expires_at<=NOW())
+            OR account.next_plan_effective_at<=NOW()
+            OR EXISTS (
+                SELECT 1 FROM subscriptions AS period
+                WHERE period.user_id=account.id AND period.status IN ('active','scheduled')
+                  AND (period.current_period_end<=NOW()
+                       OR (period.status='scheduled' AND period.current_period_start<=NOW()))
+            )
+        )
+        ORDER BY account.id LIMIT 500 FOR UPDATE OF account SKIP LOCKED
     LOOP
         IF refresh_user_subscription(item.id) THEN changed_count := changed_count+1; END IF;
     END LOOP;
@@ -102,7 +112,7 @@ $$
 
 LOCK_PAYMENT_USER_SQL = """
 CREATE OR REPLACE FUNCTION lock_payment_user_before_insert()
-RETURNS TRIGGER LANGUAGE plpgsql AS $$
+RETURNS TRIGGER LANGUAGE plpgsql SET search_path TO pg_catalog, public, pg_temp AS $$
 BEGIN
     -- Lock the account before the payment foreign key acquires its row lock.
     -- Concurrent approvals then use one consistent lock order.
@@ -116,7 +126,7 @@ $$
 
 ACTIVATE_PAYMENT_SQL = """
 CREATE OR REPLACE FUNCTION activate_subscription_after_payment()
-RETURNS TRIGGER LANGUAGE plpgsql AS $$
+RETURNS TRIGGER LANGUAGE plpgsql SET search_path TO pg_catalog, public, pg_temp AS $$
 DECLARE
     plan_days INTEGER;
     period_start TIMESTAMPTZ;
