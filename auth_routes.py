@@ -11,7 +11,9 @@ from psycopg.errors import UniqueViolation
 
 from access_policy import active_plan_code, can_access_module, days_remaining, subscription_diagnostic
 from admin_routes import get_current_user
-from database import cleanup_expired_unverified_users, get_db
+from database import (
+    DatabaseUnavailableError, cleanup_expired_unverified_users as cleanup_expired_unverified_users, get_db,
+)
 from email_service import EmailService
 from models import (
     ApiResponse,
@@ -210,7 +212,6 @@ def _create_login_session(conn, user: dict, payload: LoginRequest, request: Requ
 @router.post("/register", response_model=ApiResponse)
 def register_user(payload: RegisterRequest, request: Request):
     """Create a normal user account and send an email verification code."""
-    cleanup_expired_unverified_users()
     username = payload.username.strip()
     email = str(payload.email).strip().lower()
     password = payload.password
@@ -260,6 +261,8 @@ def register_user(payload: RegisterRequest, request: Request):
                 "Please try again later or contact support."
             ),
         )
+    except DatabaseUnavailableError:
+        raise
     except Exception:
         logger.exception("Account registration failed")
         raise HTTPException(status_code=500, detail="Account creation is temporarily unavailable. Please try again later.")
@@ -276,7 +279,6 @@ def register_user(payload: RegisterRequest, request: Request):
 @router.post("/login", response_model=AuthResponse)
 def login(payload: LoginRequest, request: Request):
     """Authenticate a user/admin and return a JWT plus public profile."""
-    cleanup_expired_unverified_users()
     login_value = payload.login.strip()
     password = payload.password
     enforce_rate_limit(request, "login", login_value)
@@ -394,7 +396,6 @@ def logout(current_user: dict = Depends(get_current_user)):
 @router.post("/verify-email", response_model=ApiResponse)
 def verify_email(payload: VerifyEmailRequest, request: Request):
     """Validate an email verification code and mark the account verified."""
-    cleanup_expired_unverified_users()
     email = str(payload.email).strip().lower()
     code = payload.code.strip()
     enforce_rate_limit(request, "verify_email", email)
@@ -440,7 +441,6 @@ def verify_email(payload: VerifyEmailRequest, request: Request):
 @router.post("/resend-code", response_model=ApiResponse)
 def resend_code(payload: ResendCodeRequest, request: Request):
     """Generate and email a fresh verification code for an unverified user."""
-    cleanup_expired_unverified_users()
     email = str(payload.email).strip().lower()
     enforce_rate_limit(request, "resend_code", email)
     code, expires_at = generate_code()

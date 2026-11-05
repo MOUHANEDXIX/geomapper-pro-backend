@@ -29,7 +29,10 @@ from auth_routes import (
 )
 from admin_routes import SESSION_INVALID_DETAIL, get_current_user, router as admin_router
 from access_policy import dashboard_for_user
-from database import DATABASE_URL, cleanup_expired_unverified_users, expire_subscriptions, get_db, init_default_admin
+from database import (
+    DATABASE_URL, DatabaseUnavailableError, cleanup_expired_unverified_users,
+    close_database_pool, expire_subscriptions, get_db, init_default_admin,
+)
 from models import ChangePasswordRequest, DeactivateAccountRequest, PaymentRequestCreate, ProfileUpdateRequest
 from rate_limit import cleanup_expired_rate_limits, enforce_rate_limit, validate_rate_limit_configuration
 from readiness import database_is_ready
@@ -42,12 +45,13 @@ from payment_routes import create_payment_request, my_payment_history, router as
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     """Initialize once, then always stop the backend's housekeeping task."""
-    startup_event()
-    await start_expired_user_cleanup()
     try:
+        await _run_blocking_database_work(startup_event)
+        await start_expired_user_cleanup()
         yield
     finally:
         await stop_expired_user_cleanup()
+        await asyncio.to_thread(close_database_pool)
 
 
 app = FastAPI(
@@ -58,6 +62,27 @@ app = FastAPI(
 
 logger = logging.getLogger(__name__)
 _expired_user_cleanup_task: asyncio.Task | None = None
+
+
+@app.exception_handler(DatabaseUnavailableError)
+async def database_unavailable(_request: Request, _error: DatabaseUnavailableError):
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "Account service is temporarily unavailable. Please try again later."},
+    )
+
+
+async def _run_blocking_database_work(operation):
+    """Keep database I/O off the event loop and drain it before pool shutdown."""
+    worker = asyncio.create_task(asyncio.to_thread(operation))
+    try:
+        return await asyncio.shield(worker)
+    except asyncio.CancelledError:
+        # Cancelling an asyncio waiter does not stop a running Python thread.
+        # Await its bounded database operation before releasing the pool.
+        with suppress(Exception):
+            await worker
+        raise
 
 
 def cors_origins_from_env() -> list[str]:
@@ -130,7 +155,7 @@ async def _cleanup_expired_users_loop():
                                  (expire_subscriptions, "Subscription expiry"),
                                  (cleanup_expired_rate_limits, "Shared rate-limit cleanup")):
             try:
-                count = operation()
+                count = await _run_blocking_database_work(operation)
                 if count:
                     logger.info("%s processed %s account(s).", label, count)
             except Exception:

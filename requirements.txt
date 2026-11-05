@@ -1,7 +1,9 @@
 -c requirements.lock.txt
-fastapi==0.136.1
+fastapi==0.162.0
 uvicorn==0.47.0
 psycopg[binary]==3.3.4
 python-dotenv==1.2.2
-python-jose[cryptography]==3.5.0
+PyJWT==2.15.1
+cryptography==50.0.2
+psycopg-pool==3.3.3
 pydantic[email]==2.13.4

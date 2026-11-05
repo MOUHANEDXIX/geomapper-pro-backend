@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import os
+import atexit
 import re
 import logging
+import threading
 from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import quote, unquote
@@ -12,8 +14,10 @@ from urllib.parse import quote, unquote
 import psycopg
 from dotenv import load_dotenv
 from psycopg.rows import dict_row
+from psycopg_pool import ConnectionPool, PoolTimeout, TooManyRequests
 
 from schema_integrity import ensure_integrity_constraints
+from schema_hardening import harden_backend_schema
 from subscription_schema import install_subscription_rules
 
 load_dotenv(Path(__file__).resolve().with_name(".env"), override=True, encoding="utf-8-sig")
@@ -88,18 +92,101 @@ def _is_production_environment() -> bool:
     return os.getenv("RENDER", "").strip().lower() in {"1", "true", "yes"}
 
 
+class DatabaseUnavailableError(RuntimeError):
+    """A bounded database operation could not complete; contains no driver details."""
+
+
+class _BackendConnection(psycopg.Connection):
+    @classmethod
+    def connect(cls, conninfo="", **kwargs):
+        # Use the public connector so deployment/test connection guards apply
+        # equally to foreground work and the pool's background workers.
+        try:
+            return psycopg.connect(conninfo, **kwargs)
+        except psycopg.Error:
+            # Pool workers log reconnect failures. Never log a DSN, hostname,
+            # or a driver's potentially sensitive connection error.
+            raise psycopg.OperationalError("Account database connection is unavailable.") from None
+
+
+_db_pool: ConnectionPool | None = None
+_db_pool_lock = threading.Lock()
+
+
+def _database_setting(name: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except ValueError:
+        raise RuntimeError(f"{name} must be an integer.") from None
+    if not minimum <= value <= maximum:
+        raise RuntimeError(f"{name} must be between {minimum} and {maximum}.")
+    return value
+
+
+def _get_database_pool() -> ConnectionPool:
+    """Create one lazy, bounded pool per backend process, without import-time I/O."""
+    global _db_pool
+    with _db_pool_lock:
+        if _db_pool is None:
+            pool = ConnectionPool(
+                DATABASE_URL,
+                connection_class=_BackendConnection,
+                kwargs={
+                    "row_factory": dict_row,
+                    "connect_timeout": _database_setting("DB_CONNECT_TIMEOUT_SECONDS", 3, 1, 30),
+                    # Supabase transaction pooling must not retain prepared
+                    # statements on a different physical database session.
+                    "prepare_threshold": None,
+                    "application_name": "geomapper-accounts",
+                },
+                min_size=0,
+                max_size=_database_setting("DB_POOL_MAX_SIZE", 5, 1, 32),
+                max_waiting=_database_setting("DB_POOL_MAX_WAITING", 20, 1, 200),
+                timeout=_database_setting("DB_POOL_TIMEOUT_SECONDS", 3, 1, 30),
+                max_idle=60,
+                reconnect_timeout=10,
+                num_workers=2,
+                name="geomapper-accounts",
+                open=False,
+            )
+            pool.open()
+            _db_pool = pool
+        return _db_pool
+
+
+def close_database_pool() -> None:
+    """Release idle connections and worker threads after ASGI work has drained."""
+    global _db_pool
+    with _db_pool_lock:
+        pool, _db_pool = _db_pool, None
+    if pool is not None:
+        pool.close(timeout=5)
+
+
+# CLI proof/preflight callers can use get_db() without entering ASGI lifespan.
+# Close while Python can still join worker threads, before late finalization.
+atexit.register(close_database_pool)
+
+
 @contextmanager
 def get_db():
-    """Yield a PostgreSQL connection and commit/rollback automatically."""
-    conn = psycopg.connect(DATABASE_URL, row_factory=dict_row)
+    """Borrow a bounded connection; atomically commit or roll back every caller."""
     try:
-        yield conn
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
+        with _get_database_pool().connection() as conn:
+            # Transaction-local settings work with transaction poolers and
+            # cannot leak to the next borrower. Values are bounded integers.
+            statement_ms = _database_setting("DB_STATEMENT_TIMEOUT_MS", 10_000, 100, 120_000)
+            lock_ms = _database_setting("DB_LOCK_TIMEOUT_MS", 2_000, 100, 30_000)
+            idle_ms = _database_setting("DB_IDLE_TRANSACTION_TIMEOUT_MS", 60_000, 1_000, 120_000)
+            conn.execute(
+                f"SET LOCAL statement_timeout = '{statement_ms}ms'; "
+                f"SET LOCAL lock_timeout = '{lock_ms}ms'; "
+                f"SET LOCAL idle_in_transaction_session_timeout = '{idle_ms}ms'"
+            )
+            yield conn
+    except (PoolTimeout, TooManyRequests, psycopg.OperationalError,
+            psycopg.errors.QueryCanceled, psycopg.errors.LockNotAvailable):
+        raise DatabaseUnavailableError("Account service is temporarily unavailable. Please try again later.") from None
 
 
 def init_db():
@@ -240,7 +327,7 @@ def init_db():
                 END IF;
                 RETURN NEW;
             END;
-            $$ LANGUAGE plpgsql
+            $$ LANGUAGE plpgsql SET search_path = pg_catalog, public, pg_temp
             """
         )
         conn.execute(
@@ -660,10 +747,11 @@ def init_db():
                         active_beta["id"],
                     ),
                 )
+        harden_backend_schema(conn)
 
 
 def init_default_admin():
-    """Create or repair the configured administrator account."""
+    """Create the configured administrator, refusing ordinary identity collisions."""
     from security import hash_password
 
     init_db()
@@ -676,11 +764,11 @@ def init_default_admin():
         # Multiple backend workers may bootstrap together. Serialize the
         # administrator's existence check and creation across those workers.
         conn.execute("SELECT pg_advisory_xact_lock(hashtextextended('geomapper-default-admin', 0))")
-        # If the admin already exists by username/email, force it back into a
-        # usable administrator state instead of creating a duplicate account.
+        # Never infer administrator authority from a mutable username/email.
+        # An existing ordinary account is a configuration error, not an admin.
         existing = conn.execute(
             """
-            SELECT id FROM app_users
+            SELECT id, role FROM app_users
             WHERE LOWER(username) = LOWER(%s)
                OR LOWER(email) = LOWER(%s)
             """,
@@ -688,23 +776,13 @@ def init_default_admin():
         ).fetchone()
 
         if existing:
-            conn.execute(
-                """
-                UPDATE app_users
-                SET role = 'admin',
-                    status = 'approved',
-                    account_state = 'active',
-                    payment_plan = 'admin',
-                    active_plan = 'admin',
-                    subscription_status = 'active',
-                    email_verified = TRUE,
-                    initial_email_verified = TRUE,
-                    email_verification_code = NULL,
-                    email_verification_expires_at = NULL
-                WHERE id = %s
-                """,
-                (existing["id"],),
-            )
+            if existing.get("role") != "admin":
+                raise RuntimeError(
+                    "Configured administrator identity belongs to a non-administrator account. "
+                    "Resolve the identity collision before starting the backend."
+                )
+            # Bootstrap is create-only: mutable usernames/email addresses must
+            # never grant privileges or reactivate an existing account.
             return
 
         if _is_production_environment() and password == "admin123":
@@ -738,17 +816,24 @@ def init_default_admin():
 
 
 def cleanup_expired_unverified_users() -> int:
-    """Delete newly-created accounts that missed their verification window."""
+    """Delete at most 500 expired new signups without waiting on active rows."""
     with get_db() as conn:
         rows = conn.execute(
             """
-            DELETE FROM app_users
-            WHERE role <> 'admin'
-              AND email_verified = FALSE
-              AND initial_email_verified = FALSE
-              AND email_verification_expires_at IS NOT NULL
-              AND email_verification_expires_at <= NOW()
-            RETURNING id
+            WITH expired AS (
+                SELECT id FROM app_users
+                WHERE role <> 'admin'
+                  AND email_verified = FALSE
+                  AND initial_email_verified = FALSE
+                  AND email_verification_expires_at IS NOT NULL
+                  AND email_verification_expires_at <= NOW()
+                ORDER BY email_verification_expires_at, id
+                LIMIT 500
+                FOR UPDATE SKIP LOCKED
+            )
+            DELETE FROM app_users AS account USING expired
+            WHERE account.id = expired.id
+            RETURNING account.id
             """
         ).fetchall()
 

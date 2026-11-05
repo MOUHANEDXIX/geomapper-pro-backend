@@ -61,7 +61,7 @@ def bucket_keys(action: str, client_ip: str, identifier: str | None, *, identifi
     """Derive private keys with the exact existing identifier normalization."""
     secret = configuration_from_environment().key_secret
     normalized = (identifier or "").strip().lower()
-    scopes = [["client", action, client_ip, normalized]]
+    scopes = [["client", action, client_ip]]
     if normalized and identifier_limited:
         scopes.append(["identifier", action, normalized])
     return [hmac.new(secret, b"geomapper-rate-limit/v1\0" + json.dumps(scope, ensure_ascii=False,
@@ -87,7 +87,7 @@ def _configure_transaction(connection) -> None:
     )
 
 
-def consume(keys: list[bytes], limit: int, window_seconds: int) -> bool:
+def consume(keys: list[bytes], limit: int, window_seconds: int, *, client_limit: int | None = None) -> bool:
     """Atomically consume every applicable budget, or consume none.
 
     Upserts lock rows in deterministic order, including the concurrent first
@@ -95,8 +95,15 @@ def consume(keys: list[bytes], limit: int, window_seconds: int) -> bool:
     overhead; a bounded, explicit cleanup operation handles expired rows.
     """
     if (not 1 <= limit <= MAX_BUDGET or not 1 <= window_seconds <= MAX_WINDOW_SECONDS
+            or (client_limit is not None and not 1 <= client_limit <= MAX_BUDGET)
             or not 1 <= len(keys) <= 2 or any(not isinstance(key, bytes) or len(key) != 32 for key in keys)):
         raise StoreUnavailable("Shared rate limiting is unavailable.")
+    # bucket_keys returns IP first, then optional account. Retain that policy
+    # association even though SQL row locks must be acquired in sorted order.
+    limits = {}
+    for index, key in enumerate(keys):
+        budget = client_limit if index == 0 and client_limit is not None else limit
+        limits[key] = min(limits.get(key, budget), budget)
     try:
         configuration = configuration_from_environment()
         with _connection(configuration) as connection:
@@ -118,7 +125,7 @@ def consume(keys: list[bytes], limit: int, window_seconds: int) -> bool:
             now = connection.execute("SELECT clock_timestamp()").fetchone()[0]
             cutoff = now - timedelta(seconds=window_seconds)
             current = [(key, [value for value in attempts if value > cutoff]) for key, attempts in budgets]
-            if any(len(attempts) >= limit for _, attempts in current):
+            if any(len(attempts) >= limits[key] for key, attempts in current):
                 # Return normally to commit the no-op row locks. No attempts
                 # or expiry values change, including the other empty budget.
                 return False
